@@ -1,0 +1,11 @@
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+sentence-transformers>=2.7,<3.0
+scikit-learn>=1.4,<2.0
+numpy>=1.26,<2.0
+psycopg2-binary>=2.9,<3.0
+pgvector>=0.2,<1.0
+# Windows: install with --prefer-binary to avoid C compiler requirement
+# conda users: conda install -c conda-forge hdbscan
+hdbscan>=0.8,<1.0
+python-dotenv>=1.0,<2.0
