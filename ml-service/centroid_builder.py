@@ -1,9 +1,26 @@
 """
-Offline centroid builder.
+Offline centroid builder — multi-centroid k-means per category.
 
-Reads labeled shipments from the `shipment_labels` table, embeds their text
-using all-MiniLM-L6-v2, computes an L2-normalized incremental mean per category,
-and UPSERTs the result into `category_centroids`.
+Reads labeled shipments from `shipment_labels` (split='train'), embeds their
+text using the configured sentence-transformer, runs k-means inside each
+category to produce 1–4 sub-centroids, and UPSERTs them into
+`category_centroids` keyed by (category_id, cluster_id).
+
+Why multi-centroid:
+    Heterogeneous categories (e.g. `machinery` spanning pumps, compressors,
+    tractors, CNC tools) are poorly represented by a single mean. Sub-clusters
+    give each sub-topic its own centroid and recall improves substantially —
+    at inference time the score for a category is the max cosine across its
+    sub-centroids.
+
+Adaptive k:
+    k = clip(n_samples // 20, 1, 4)
+    So a 35-sample category uses k=1 (no benefit to splitting), a 65-sample
+    category uses k=3. Purely data-driven; no per-category tuning.
+
+Configuration:
+    EMBEDDING_MODEL env var — defaults to BAAI/bge-small-en-v1.5 (384-dim).
+    Must match what the API service uses at inference time.
 
 Run:
     python centroid_builder.py
@@ -11,72 +28,46 @@ Run:
 Schedule:
     Weekly via cron or task scheduler. After each run, call POST /reload on the
     API service so the new centroids are loaded into memory without a restart.
-
-# CONFIGURE THIS (production):
-    The SAMPLING_QUERY below targets the `shipment_labels` PoC table. In
-    production, replace it with a JOIN against your real shipments table, e.g.:
-        SELECT cc.name, s.shipment_id,
-               s.cargo_document_description || ' ' || s.commodity_description
-        FROM   your_labels_table sl
-        JOIN   your_shipments_table s ON s.id = sl.shipment_id
-        JOIN   classification_categories cc ON cc.name = sl.category_name
-        WHERE  cc.is_active = true AND cc.name = %s
-        LIMIT  %s
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 
+from classifier import embed_texts, model  # reuses configured model
 from db import get_connection
+from preprocess import build_query_text
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BATCH_SIZE          = 512   # rows to embed in one model.encode() call
-SAMPLE_PER_CATEGORY = 2000  # max labeled rows sampled per category
-MODEL_NAME          = "all-MiniLM-L6-v2"
+BATCH_SIZE          = 512
+SAMPLE_PER_CATEGORY = 2000
 
 
-# ── Incremental centroid accumulator ───────────────────────────────────────────
+def _choose_k(n_samples: int) -> int:
+    """Adaptive cluster count per category.
 
-class IncrementalCentroid:
-    """Accumulates embeddings batch-by-batch and returns the L2-normalized mean."""
-
-    def __init__(self):
-        self.sum   = None
-        self.count = 0
-
-    def update(self, batch_embeddings: np.ndarray) -> None:
-        """Add a batch of shape (n, 384) to the running sum."""
-        if self.sum is None:
-            self.sum = batch_embeddings.sum(axis=0)
-        else:
-            self.sum = self.sum + batch_embeddings.sum(axis=0)
-        self.count += len(batch_embeddings)
-
-    def centroid(self) -> np.ndarray:
-        """Return the L2-normalized mean vector."""
-        if self.count == 0:
-            raise ValueError("No embeddings have been added to this accumulator.")
-        mean = self.sum / self.count
-        norm = np.linalg.norm(mean)
-        if norm == 0:
-            raise ValueError("Centroid has zero norm — all embeddings may be zero vectors.")
-        return mean / norm
+    Multi-centroid helps heterogeneous categories (e.g. machinery covering
+    pumps, compressors, CNC tools) but hurts precision for homogeneous ones
+    by letting sub-centroids drift toward neighboring categories' topic
+    space. Require a higher per-cluster sample count (50 vs 20) so we only
+    split categories that are genuinely multi-modal.
+    """
+    if n_samples <= 0:
+        return 0
+    return int(max(1, min(4, n_samples // 50)))
 
 
-# ── Core builder ───────────────────────────────────────────────────────────────
-
-# CONFIGURE THIS (production): replace with your real labeled data query.
-# Only 'train' split rows are used — validation and test rows are held out
-# for threshold tuning and final evaluation respectively.
+# Only train-split rows feed centroid building — validation/test held out for
+# tuning and final evaluation.
 SAMPLING_QUERY = """
-    SELECT sl.category_name,
-           sl.shipment_id,
-           sl.cargo_text || ' ' || sl.commodity_text AS combined_text
+    SELECT sl.shipment_id,
+           sl.cargo_text,
+           sl.commodity_text
     FROM   shipment_labels sl
     JOIN   classification_categories cc ON cc.name = sl.category_name
     WHERE  cc.is_active = true
@@ -89,12 +80,9 @@ SAMPLING_QUERY = """
 
 def build_and_persist(conn) -> None:
     """
-    Build one centroid per active category and UPSERT into category_centroids.
-    Uses a separate per-category query (up to SAMPLE_PER_CATEGORY rows each).
+    Build 1-4 sub-centroids per active category (k-means on the train split)
+    and UPSERT them into category_centroids.
     """
-    model = SentenceTransformer(MODEL_NAME)
-
-    # Fetch active category names
     with conn.cursor() as cur:
         cur.execute("SELECT name FROM classification_categories WHERE is_active = true ORDER BY name")
         active_categories = [row[0] for row in cur.fetchall()]
@@ -104,57 +92,70 @@ def build_and_persist(conn) -> None:
         return
 
     print(f"Building centroids for {len(active_categories)} active categories...")
+    print(f"Model: {model._first_module().auto_model.config.name_or_path if hasattr(model, '_first_module') else 'unknown'}")
 
-    accumulators: dict[str, IncrementalCentroid] = {}
+    # Collect all sub-centroid rows to write in one transaction.
+    # Format: [(category_name, cluster_id, centroid_vec, sample_count), ...]
+    to_upsert: list[tuple[str, int, list, int]] = []
 
     for category in active_categories:
-        # Server-side cursor streams rows without loading all into memory
-        cursor_name = f"centroid_cursor_{category}"
-        with conn.cursor(name=cursor_name) as cur:
+        with conn.cursor() as cur:
             cur.execute(SAMPLING_QUERY, (category, SAMPLE_PER_CATEGORY))
+            rows = cur.fetchall()
 
-            rows_processed = 0
-            acc = IncrementalCentroid()
-
-            while True:
-                rows = cur.fetchmany(BATCH_SIZE)
-                if not rows:
-                    break
-
-                texts      = [row[2] for row in rows]
-                embeddings = normalize(model.encode(texts, batch_size=BATCH_SIZE, show_progress_bar=False))
-                acc.update(embeddings)
-                rows_processed += len(rows)
-
-        if acc.count == 0:
-            print(f"  [{category}] WARNING: no labeled rows found — skipping.")
+        if not rows:
+            print(f"  [{category}] WARNING: no labeled rows — skipping.")
             continue
 
-        accumulators[category] = acc
-        print(f"  [{category}] {acc.count} samples processed.")
+        texts = [build_query_text(cargo, commodity) for _sid, cargo, commodity in rows]
+        embeddings = embed_texts(texts)   # already L2-normalized, shape (n, dim)
 
-    if not accumulators:
+        k = _choose_k(len(rows))
+        if k == 1:
+            centroid = embeddings.mean(axis=0)
+            centroid = centroid / np.linalg.norm(centroid)
+            to_upsert.append((category, 0, centroid.tolist(), len(rows)))
+            print(f"  [{category}] {len(rows)} samples → k=1")
+        else:
+            # n_init='auto' is the modern sklearn default and suppresses the
+            # deprecation warning on sklearn >= 1.4.
+            km = KMeans(n_clusters=k, n_init="auto", random_state=42)
+            labels = km.fit_predict(embeddings)
+            for cluster_id in range(k):
+                mask = labels == cluster_id
+                n_in_cluster = int(mask.sum())
+                if n_in_cluster == 0:
+                    continue
+                centroid = embeddings[mask].mean(axis=0)
+                centroid = centroid / np.linalg.norm(centroid)
+                to_upsert.append((category, cluster_id, centroid.tolist(), n_in_cluster))
+            sizes = [int((labels == c).sum()) for c in range(k)]
+            print(f"  [{category}] {len(rows)} samples → k={k} cluster_sizes={sizes}")
+
+    if not to_upsert:
         print("No centroids built. Check that shipment_labels has data.")
         return
 
-    # UPSERT all centroids in a single transaction
-    with conn.cursor() as wc:
-        for category, acc in accumulators.items():
-            centroid_vec = acc.centroid()
-            wc.execute("""
-                INSERT INTO category_centroids (category_id, centroid, sample_count, updated_at)
-                SELECT id, %s, %s, now()
+    # Wipe-and-rebuild: centroids are a derived artifact. Delete all existing
+    # rows then insert the new set so a reduction in k for a category doesn't
+    # leave stale cluster_ids behind.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM category_centroids")
+        for category, cluster_id, centroid, sample_count in to_upsert:
+            cur.execute("""
+                INSERT INTO category_centroids (category_id, cluster_id, centroid, sample_count, updated_at)
+                SELECT id, %s, %s, %s, now()
                 FROM   classification_categories
                 WHERE  name = %s
-                ON CONFLICT (category_id) DO UPDATE
-                    SET centroid     = EXCLUDED.centroid,
-                        sample_count = EXCLUDED.sample_count,
-                        updated_at   = now()
-            """, (centroid_vec.tolist(), acc.count, category))
-
+            """, (cluster_id, centroid, sample_count, category))
     conn.commit()
-    print(f"\nDone. Built centroids for {len(accumulators)} categories.")
-    print("Next step: call POST /reload on the API service to pick up the new centroids.")
+
+    n_categories = len({row[0] for row in to_upsert})
+    n_centroids  = len(to_upsert)
+    print(f"\nDone. Built {n_centroids} sub-centroids across {n_categories} categories.")
+    print("Next steps:")
+    print("  1. Fit calibration:  python fit_calibration.py")
+    print("  2. Reload API:       curl -X POST http://localhost:8001/reload")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

@@ -39,14 +39,77 @@ CREATE TABLE IF NOT EXISTS category_keywords (
 CREATE INDEX IF NOT EXISTS idx_kw_category ON category_keywords(category_id);
 
 -- ── category_centroids ────────────────────────────────────────────────────────
--- One L2-normalized mean vector per category. Built by centroid_builder.py
+-- L2-normalized centroid vectors per category. Built by centroid_builder.py
 -- from train-split rows only. Never inserted manually.
+--
+-- Each category can have multiple sub-centroids (k-means clusters inside the
+-- category). Score at inference = max cosine similarity across sub-centroids.
+-- Categories with cluster_id=0 only are the single-centroid fallback.
 CREATE TABLE IF NOT EXISTS category_centroids (
-    category_id   INT PRIMARY KEY REFERENCES classification_categories(id) ON DELETE CASCADE,
+    category_id   INT NOT NULL REFERENCES classification_categories(id) ON DELETE CASCADE,
+    cluster_id    INT NOT NULL DEFAULT 0,
     centroid      vector(384) NOT NULL,
     sample_count  INT,
-    updated_at    TIMESTAMPTZ DEFAULT now()
+    updated_at    TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (category_id, cluster_id)
 );
+
+-- Migration: on existing DBs created before multi-centroid support, the PK was
+-- (category_id) only. Switch it to (category_id, cluster_id) idempotently.
+DO $$
+BEGIN
+    -- Add cluster_id if missing
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'category_centroids' AND column_name = 'cluster_id'
+    ) THEN
+        ALTER TABLE category_centroids ADD COLUMN cluster_id INT NOT NULL DEFAULT 0;
+    END IF;
+
+    -- If the old single-column PK is still in place, drop and re-add
+    IF EXISTS (
+        SELECT 1
+        FROM   pg_constraint pc
+        JOIN   pg_attribute  pa ON pa.attrelid = pc.conrelid AND pa.attnum = ANY(pc.conkey)
+        WHERE  pc.conname = 'category_centroids_pkey'
+        GROUP  BY pc.conname
+        HAVING COUNT(*) = 1
+    ) THEN
+        ALTER TABLE category_centroids DROP CONSTRAINT category_centroids_pkey;
+        ALTER TABLE category_centroids ADD PRIMARY KEY (category_id, cluster_id);
+    END IF;
+END $$;
+
+-- ── classification_categories: tuning/calibration columns ─────────────────────
+-- Added additively so existing rows get defaults.
+--   semantic_weight, keyword_weight: per-category blend (default 0.8 / 0.2)
+--   platt_a, platt_b: Platt-scaling calibration fit on validation split
+--                     (probability = sigmoid(platt_a * final_score + platt_b))
+--                     NULL until fit_calibration.py has been run.
+--   threshold: optional per-category threshold override (NULL → use request)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='classification_categories' AND column_name='semantic_weight') THEN
+        ALTER TABLE classification_categories ADD COLUMN semantic_weight NUMERIC(3,2) NOT NULL DEFAULT 0.80;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='classification_categories' AND column_name='keyword_weight') THEN
+        ALTER TABLE classification_categories ADD COLUMN keyword_weight  NUMERIC(3,2) NOT NULL DEFAULT 0.20;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='classification_categories' AND column_name='platt_a') THEN
+        ALTER TABLE classification_categories ADD COLUMN platt_a DOUBLE PRECISION;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='classification_categories' AND column_name='platt_b') THEN
+        ALTER TABLE classification_categories ADD COLUMN platt_b DOUBLE PRECISION;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='classification_categories' AND column_name='threshold') THEN
+        ALTER TABLE classification_categories ADD COLUMN threshold NUMERIC(4,3);
+    END IF;
+END $$;
 
 -- ── shipment_labels ───────────────────────────────────────────────────────────
 -- Labeled training data. split column controls which rows are used by each tool:

@@ -4,75 +4,95 @@ FastAPI classification service.
 Endpoints:
     GET  /health           — liveness check
     POST /classify         — classify a single shipment
-    POST /classify/batch   — classify up to 500 shipments (optimized batch encoding)
-    POST /reload           — reload centroids + keywords from DB without restart
+    POST /classify/batch   — classify up to 500 shipments (single batched embed)
+    POST /reload           — reload centroids + keywords + per-cat config from DB
 
 Environment:
-    DATABASE_URL — see .env.example
+    DATABASE_URL     — Postgres connection string (see .env.example)
+    EMBEDDING_MODEL  — optional; defaults to BAAI/bge-small-en-v1.5
 
 Start:
     uvicorn main:app --host 0.0.0.0 --port 8000
 
-TODO (production):
-    - Replace single psycopg2 connection with ThreadedConnectionPool or asyncpg.
-    - /reload updates in-memory state for single-worker only. Multi-worker
-      deployments need a shared cache (Redis) or a full service restart.
+Design notes:
+    - A ThreadedConnectionPool in db.py feeds every request (no more global
+      single connection).
+    - Scoring logic lives in classifier.predict / predict_batch. main.py is
+      only wiring: request validation, persistence, response shaping.
+    - /reload mutates in-memory state for the current worker only. Multi-worker
+      deployments need a rolling restart or a shared cache — see README.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
-import numpy as np
 import psycopg2
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from classifier import (
     MODEL_NAME,
-    KEYWORD_WEIGHT,
-    keyword_score,
+    UNCLASSIFIED_THRESHOLD_DEFAULT,
+    load_category_config,
     load_centroids,
     load_keywords,
-    model,
-    normalize,
     predict,
-    text_quality_check,
-    UNCLASSIFIED_THRESHOLD,
+    predict_batch,
 )
-from db import get_connection
+from db import close_pool, pooled_connection
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Shipment Classifier",
     description="Multi-label NLP classification using sentence embeddings and pgvector.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
-conn: psycopg2.extensions.connection = None   # type: ignore[assignment]
-centroids: dict = {}
-keywords:  dict = {}
+# In-memory state refreshed on /reload
+centroids:       dict = {}
+keywords:        dict = {}
+category_config: dict = {}
 
 
 @app.on_event("startup")
 def startup() -> None:
-    global conn, centroids, keywords
-    conn      = get_connection()
-    centroids = load_centroids(conn)
-    keywords  = load_keywords(conn)
-    print(f"Loaded {len(centroids)} category centroids.")
+    global centroids, keywords, category_config
+    with pooled_connection() as conn:
+        centroids       = load_centroids(conn)
+        keywords        = load_keywords(conn)
+        category_config = load_category_config(conn)
+    print(
+        f"Loaded {len(centroids)} category centroids "
+        f"(sub-centroids total: {sum(len(v) for v in centroids.values())}), "
+        f"model={MODEL_NAME}"
+    )
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    close_pool()
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
 
 class ClassifyRequest(BaseModel):
-    shipment_id:           str
-    cargo_description:     str
-    commodity_description: str
-    threshold:             float = Field(default=0.45, ge=0.0, le=1.0)
-    persist:               bool  = Field(
+    shipment_id:            str
+    cargo_description:      str
+    commodity_description:  str
+    threshold:              float = Field(default=0.45, ge=0.0, le=1.0)
+    unclassified_threshold: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description=(
+            "Floor below which results are flagged `unclassified`. "
+            f"Defaults to min({UNCLASSIFIED_THRESHOLD_DEFAULT}, threshold) so "
+            "low user thresholds aren't overridden."
+        ),
+    )
+    persist: bool = Field(
         default=False,
         description="If true, write the classification result to shipment_classifications.",
     )
@@ -84,50 +104,45 @@ class ClassifyBatchRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _persist_result(shipment_id: str, result: dict, threshold: float) -> None:
-    """Write a classification result to shipment_classifications."""
-    import json
+def _persist_one(cur, shipment_id: str, result: dict, threshold: float) -> None:
+    """INSERT one classification result. Caller manages transaction."""
     embedding = result.get("embedding")
-    scores    = result.get("scores", {})
+    scores    = result.get("scores", {}) or {}
 
-    # Remove embedding key from scores (it's stored separately)
     scores_serializable = {
         cat: {k: v for k, v in s.items() if k != "embedding"}
         for cat, s in scores.items()
     }
 
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO shipment_classifications
-                (shipment_id, embedding, categories, scores, confidence_state,
-                 threshold_used, model_version, classified_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-            ON CONFLICT (shipment_id) DO UPDATE
-                SET embedding        = EXCLUDED.embedding,
-                    categories       = EXCLUDED.categories,
-                    scores           = EXCLUDED.scores,
-                    confidence_state = EXCLUDED.confidence_state,
-                    threshold_used   = EXCLUDED.threshold_used,
-                    model_version    = EXCLUDED.model_version,
-                    classified_at    = now()
-        """, (
-            shipment_id,
-            embedding.tolist() if embedding is not None else None,
-            result["categories"],
-            json.dumps(scores_serializable),
-            result["confidence_state"],
-            threshold,
-            MODEL_NAME,
-        ))
-    conn.commit()
+    cur.execute("""
+        INSERT INTO shipment_classifications
+            (shipment_id, embedding, categories, scores, confidence_state,
+             threshold_used, model_version, classified_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+        ON CONFLICT (shipment_id) DO UPDATE
+            SET embedding        = EXCLUDED.embedding,
+                categories       = EXCLUDED.categories,
+                scores           = EXCLUDED.scores,
+                confidence_state = EXCLUDED.confidence_state,
+                threshold_used   = EXCLUDED.threshold_used,
+                model_version    = EXCLUDED.model_version,
+                classified_at    = now()
+    """, (
+        shipment_id,
+        embedding.tolist() if embedding is not None else None,
+        result["categories"],
+        json.dumps(scores_serializable),
+        result["confidence_state"],
+        threshold,
+        MODEL_NAME,
+    ))
 
 
 def _build_response(req: ClassifyRequest, result: dict) -> dict:
     """Build the standard API response envelope."""
-    # Strip embedding from scores (internal, not sent to caller)
     scores_out = {
         cat: {k: v for k, v in s.items() if k != "embedding"}
-        for cat, s in result.get("scores", {}).items()
+        for cat, s in (result.get("scores") or {}).items()
     }
 
     response = {
@@ -152,6 +167,8 @@ def _build_response(req: ClassifyRequest, result: dict) -> dict:
 
     if result.get("reason"):
         response["result"]["reason"] = result["reason"]
+    if result.get("quality"):
+        response["result"]["quality"] = result["quality"]
 
     return response
 
@@ -161,9 +178,13 @@ def _build_response(req: ClassifyRequest, result: dict) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {
-        "status":           "ok",
-        "categories_loaded": len(centroids),
-        "model_version":    MODEL_NAME,
+        "status":             "ok",
+        "categories_loaded":  len(centroids),
+        "sub_centroids":      sum(len(v) for v in centroids.values()),
+        "model_version":      MODEL_NAME,
+        "calibrated":         any(
+            c.get("platt_a") is not None for c in category_config.values()
+        ),
     }
 
 
@@ -174,15 +195,27 @@ def classify(req: ClassifyRequest) -> dict:
         req.commodity_description,
         centroids,
         keywords,
-        req.threshold,
+        category_config,
+        threshold=req.threshold,
+        unclassified_threshold=req.unclassified_threshold,
     )
 
     if req.persist:
         try:
-            _persist_result(req.shipment_id, result, req.threshold)
+            with pooled_connection() as conn:
+                with conn.cursor() as cur:
+                    _persist_one(cur, req.shipment_id, result, req.threshold)
+                conn.commit()
         except Exception as exc:
-            # Don't let a DB write failure break the classification response
+            # Don't let a DB write failure break the classification response.
+            # The pooled_connection context ensures the connection returns to
+            # the pool; rollback is implicit on context exit for failed txns.
             print(f"WARNING: failed to persist {req.shipment_id}: {exc}")
+            try:
+                with pooled_connection() as conn:
+                    conn.rollback()
+            except Exception:
+                pass
 
     return _build_response(req, result)
 
@@ -190,107 +223,55 @@ def classify(req: ClassifyRequest) -> dict:
 @app.post("/classify/batch")
 def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
     """
-    Optimized batch endpoint.
-
-    Collects all texts and calls model.encode() once — significantly faster
-    than calling predict() per shipment, which would embed one text at a time.
+    Batched classification — single embedding call for all valid rows.
     """
     shipments = req.shipments
+    inputs    = [(s.cargo_description, s.commodity_description) for s in shipments]
+    thrs      = [s.threshold for s in shipments]
+    unc_thrs  = [s.unclassified_threshold for s in shipments]
 
-    # Separate valid vs. quality-filtered shipments up front
-    valid_indices: list[int] = []
-    results: list[dict | None] = [None] * len(shipments)
+    results = predict_batch(
+        inputs,
+        centroids,
+        keywords,
+        category_config,
+        thresholds=thrs,
+        unclassified_thresholds=unc_thrs,
+    )
 
-    texts: list[str] = []
-    for i, s in enumerate(shipments):
-        text    = f"{s.cargo_description} {s.commodity_description}".strip()
-        quality = text_quality_check(text)
-        if quality != "ok":
-            results[i] = {
-                "categories":       [],
-                "confidence_state": "unclassified",
-                "reason":           "insufficient_input",
-                "scores":           {},
-                "embedding":        None,
-            }
-        else:
-            valid_indices.append(i)
-            texts.append(text)
-
-    # Batch-encode all valid texts in a single call
-    if texts:
-        embeddings = normalize(model.encode(texts, batch_size=512, show_progress_bar=False))
-
-        for offset, idx in enumerate(valid_indices):
-            s         = shipments[idx]
-            embedding = embeddings[offset]
-
-            scores: dict = {}
-            max_score = 0.0
-            for category, centroid in centroids.items():
-                sem        = round(float(np.dot(embedding, centroid)), 4)
-                kw_s, hits = keyword_score(
-                    f"{s.cargo_description} {s.commodity_description}",
-                    keywords.get(category, []),
-                )
-                final = round((1 - KEYWORD_WEIGHT) * sem + KEYWORD_WEIGHT * kw_s, 4)
-                scores[category] = {
-                    "semantic_score": sem,
-                    "keyword_score":  kw_s,
-                    "final_score":    final,
-                    "matched":        False,
-                    "keywords_hit":   hits,
-                }
-                max_score = max(max_score, final)
-
-            if max_score < UNCLASSIFIED_THRESHOLD:
-                confidence_state = "unclassified"
-                reason           = "low_similarity"
-                matched_cats: list[str] = []
-            elif max_score < s.threshold:
-                confidence_state = "low_confidence"
-                reason           = None
-                top_cat          = max(scores, key=lambda c: scores[c]["final_score"])
-                matched_cats     = [top_cat]
-                scores[top_cat]["matched"] = True
-            else:
-                confidence_state = "classified"
-                reason           = None
-                matched_cats     = [c for c, sc in scores.items() if sc["final_score"] >= s.threshold]
-                for c in matched_cats:
-                    scores[c]["matched"] = True
-
-            results[idx] = {
-                "categories":       matched_cats,
-                "confidence_state": confidence_state,
-                "reason":           reason,
-                "scores":           scores,
-                "embedding":        embedding,
-            }
-
-    # Persist and build responses
-    responses = []
-    for i, s in enumerate(shipments):
-        result = results[i]
-        if s.persist:
+    # Persist (single transaction for the whole batch).
+    persist_indices = [i for i, s in enumerate(shipments) if s.persist]
+    if persist_indices:
+        try:
+            with pooled_connection() as conn:
+                with conn.cursor() as cur:
+                    for i in persist_indices:
+                        _persist_one(cur, shipments[i].shipment_id, results[i], shipments[i].threshold)
+                conn.commit()
+        except Exception as exc:
+            print(f"WARNING: batch persist failed ({exc}); rolling back.")
             try:
-                _persist_result(s.shipment_id, result, s.threshold)
-            except Exception as exc:
-                print(f"WARNING: failed to persist {s.shipment_id}: {exc}")
-        responses.append(_build_response(s, result))
+                with pooled_connection() as conn:
+                    conn.rollback()
+            except Exception:
+                pass
 
-    return responses
+    return [_build_response(shipments[i], results[i]) for i in range(len(shipments))]
 
 
 @app.post("/reload")
 def reload() -> dict:
-    """Reload centroids and keywords from DB without restarting the service."""
-    global centroids, keywords
-    new_centroids = load_centroids(conn)
-    new_keywords  = load_keywords(conn)
-    centroids = new_centroids
-    keywords  = new_keywords
+    """Reload centroids, keywords, and per-category config from DB."""
+    global centroids, keywords, category_config
+    with pooled_connection() as conn:
+        centroids       = load_centroids(conn)
+        keywords        = load_keywords(conn)
+        category_config = load_category_config(conn)
     return {
-        "status":            "reloaded",
-        "categories_loaded": len(centroids),
+        "status":             "reloaded",
+        "categories_loaded":  len(centroids),
+        "sub_centroids":      sum(len(v) for v in centroids.values()),
+        "calibrated":         any(
+            c.get("platt_a") is not None for c in category_config.values()
+        ),
     }
