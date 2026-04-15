@@ -21,6 +21,7 @@ Not done:
 
 from __future__ import annotations
 
+import os
 import re
 
 # ── Boilerplate removal ───────────────────────────────────────────────────────
@@ -106,7 +107,22 @@ def normalize(text: str) -> str:
     return s
 
 
-def build_query_text(cargo: str, commodity: str) -> str:
+def _is_e5_model() -> bool:
+    """True when the configured embedding model is an intfloat/e5* checkpoint."""
+    name = os.environ.get("EMBEDDING_MODEL", "").lower()
+    # Fallback to the default baked into classifier.MODEL_NAME — we can't import
+    # classifier here (circular), but the env var is the authoritative override
+    # at runtime and the branch's default is also an e5 checkpoint.
+    if not name:
+        try:
+            from classifier import MODEL_NAME  # type: ignore
+            name = MODEL_NAME.lower()
+        except Exception:
+            return False
+    return name.startswith("intfloat/e5")
+
+
+def build_query_text(cargo: str, commodity: str, role: str = "query") -> str:
     """
     Combine cargo + commodity fields into the exact string that gets embedded.
 
@@ -117,9 +133,20 @@ def build_query_text(cargo: str, commodity: str) -> str:
     between categories. Plain concat avoids that.
 
     MUST be used identically at centroid-build time and inference time.
+
+    The `role` parameter only matters for asymmetric-trained models
+    (intfloat/e5-*) that were fine-tuned to expect `"query: "` and
+    `"passage: "` prefixes. For symmetric models (MiniLM, BGE) the role is
+    ignored and the returned string is identical either way. Call sites:
+        - centroid_builder.py -> role="passage"
+        - classifier.predict / predict_batch -> role="query" (default)
+        - fit_calibration.py -> role="query" (validation samples score as queries)
     """
     c = normalize(cargo or "")
     m = normalize(commodity or "")
-    if c and m:
-        return f"{c} {m}"
-    return c or m
+    combined = f"{c} {m}" if (c and m) else (c or m)
+
+    if _is_e5_model():
+        prefix = "passage: " if role == "passage" else "query: "
+        return prefix + combined
+    return combined

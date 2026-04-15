@@ -42,7 +42,7 @@ from preprocess import build_query_text, normalize as preprocess_normalize
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-MODEL_NAME                    = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MODEL_NAME                    = os.environ.get("EMBEDDING_MODEL", "intfloat/e5-small-v2")
 UNCLASSIFIED_THRESHOLD_DEFAULT = 0.35
 KEYWORD_SATURATION_ALPHA       = 0.5   # 1 hit@1.0 → 0.39, 2 hits → 0.63, 3 hits → 0.78
 

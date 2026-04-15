@@ -65,7 +65,7 @@ def _collect_scores(conn, centroids, keywords, category_config) -> tuple[list[di
         if text_quality_check(c, m) != "ok":
             continue
         valid_indices.append(i)
-        embed_inputs.append(build_query_text(c, m))
+        embed_inputs.append(build_query_text(c, m, role="query"))
         keyword_texts.append(preprocess_normalize(f"{c} {m}"))
 
     if not embed_inputs:

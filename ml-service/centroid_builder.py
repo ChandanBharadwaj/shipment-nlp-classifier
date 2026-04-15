@@ -107,7 +107,7 @@ def build_and_persist(conn) -> None:
             print(f"  [{category}] WARNING: no labeled rows — skipping.")
             continue
 
-        texts = [build_query_text(cargo, commodity) for _sid, cargo, commodity in rows]
+        texts = [build_query_text(cargo, commodity, role="passage") for _sid, cargo, commodity in rows]
         embeddings = embed_texts(texts)   # already L2-normalized, shape (n, dim)
 
         k = _choose_k(len(rows))
