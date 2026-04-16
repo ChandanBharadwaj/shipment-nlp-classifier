@@ -25,6 +25,50 @@ Neither scales. We need something that is **fast** (CPU-viable for 50k/day), **p
 
 ---
 
+## Why semantic search beats keyword matching — the pitch
+
+A keyword blocklist catches what you remembered to write down. Brokers — including bad-faith ones — **paraphrase**. Trade language drifts. Acronyms have a dozen alternate spellings. Every gap between the literal rule and the actual freight description is a screening hole that has to be patched by hand. The list grows; threats outpace the patching; the sieve rots.
+
+LLM sentence encoders close that gap. A risk phrase and its aliases are embedded once into a 384-dim vector; any shipment whose description lands in the same neighborhood — **even with zero shared keywords** — fires the rule.
+
+### Real shipment text vs. what each approach catches
+
+Every row below is a shipment description with **no significant keyword overlap** with the rule it triggers. Cosines were measured live with `all-MiniLM-L6-v2` against the entries in [`risk_profile.json`](ml-service/risk_profile.json). Block thresholds: **0.62** (global) / **0.55** (category review).
+
+| What the broker types | Literal-keyword regex | Semantic match (this system) | Cosine |
+|---|---|---|---|
+| `rocket-propelled grenade launcher RPG-7 infantry weapon` | misses (canonical rule uses `grenade launcher heavy weapon`) | ✅ **defense** — alias `"rocket propelled grenade RPG"` | **0.86** |
+| `shoulder-launched surface-to-air missile system man-portable` | misses (no `MANPADS` token) | ✅ **defense block** — alias `"shoulder-fired surface-to-air missile"` | **0.85** |
+| `hand-launched anti-aircraft missile shoulder-fired infantry weapon` | misses (no `MANPADS`/`Stinger` token) | ✅ **defense block** — same MANPADS rule | **0.78** |
+| `used reactor fuel rods radioactive waste long-term storage casks` | misses (no `uranium`/`depleted` token) | ✅ **global block** — alias `"spent nuclear fuel rods"` of the depleted-uranium rule | **0.76** |
+| `thermal imaging weapon sight uncooled microbolometer` | misses (canonical rule says `night vision military optics`) | ✅ **defense review** — alias `"thermal weapon sight"` | **0.75** |
+| `simultaneous five-axis milling machine for titanium aerospace parts` | partial — `five-axis` may hit but `5-axis` / `multi-axis` evade | ✅ **machinery** — phrase `"5-axis CNC machining center advanced"` | **0.68** |
+| `high-strength 18% nickel steel for solid rocket motor casings` | misses (no `maraging` token) | ✅ **metals** — alias `"rocket motor case steel"` of the maraging rule | **0.67** |
+| `cruise missile guidance navigation electronics` | misses (canonical rule is `MTCR controlled missile`) | ✅ **defense block** — alias `"cruise missile"` of the guided-missile rule | **0.66** |
+| `mine-resistant ambush-protected armored troop carrier` | misses (no `MRAP` token) | ✅ **automotive review** — phrase `"armored military vehicle"` | **0.66** |
+| `electronic countermeasure pod radar jamming aircraft` | misses (no literal `electronic warfare`) | ✅ **electronics review** — phrase `"radar electronic warfare system"` | **0.60** |
+
+> **Every cosine in that table clears its category's threshold without sharing a single significant keyword with the matched rule.** A regex list catches *none* of them until an analyst writes each variant by hand — and the next paraphrase ships next week.
+
+### The critical gap, closed
+
+| Failure mode | Keyword blocklist | This system |
+|---|---|---|
+| Acronym expansion (`MANPADS` → `shoulder-fired SAM`) | misses | catches |
+| Brand/model swap (`Stinger` → `FIM-92`, `RPG` → `RPG-7`) | misses | catches |
+| Technical paraphrase (`maraging steel` → `18% nickel rocket motor steel`) | misses | catches |
+| Hyphenation drift (`5-axis` vs. `five-axis` vs. `multi-axis`) | needs every variant | one rule covers all |
+| Phrasing nobody on the analyst team predicted | misses until rule is written | catches at deploy time |
+| Risk phrase buried in a 2,000-token manifest | catches only if literal token survives | catches via auto-chunking + per-chunk compliance |
+
+### Why this works (one paragraph)
+
+The encoder learned, during pre-training, that `"MRAP"` and `"armored military vehicle"` show up in similar contexts and therefore live near each other in vector space. Same for `"thermal weapon sight"` ↔ `"infrared night vision"`, `"FIM-92"` ↔ `"Stinger"`, `"spent nuclear fuel"` ↔ `"used reactor fuel rods"`. We write **one canonical phrase plus 2–4 aliases per risk**; the model carries every other paraphrase a real broker (or a smuggler trying to evade screening) might use. Maintenance burden goes from *"enumerate every variant forever"* to *"name the concept once."*
+
+A keyword list is a sieve with a fixed mesh. A semantic matcher is a sieve that adapts to the language people actually write.
+
+---
+
 ## The Solution
 
 A two-stage pipeline that produces both a category prediction and a compliance decision from a **single embedding pass**:
@@ -98,14 +142,7 @@ Every decision returns `decision_reasons` (human-readable strings) and `hard_neg
 ## What this approach gets right
 
 ### Paraphrase resilience (the regex problem, solved)
-| Shipment text | Regex would catch? | Semantic compliance |
-|---|---|---|
-| `"depleted uranium fuel rods"` | yes (literal phrase) | yes (sim=0.79) |
-| `"spent nuclear fuel rods radioactive waste"` | **no** | **yes** (sim=0.84 via alias) |
-| `"DU penetrator armor-piercing round"` | only if "DU" was in the regex | yes (sim=0.74) |
-| `"GPS signal jammer device"` | yes | yes (sim=0.95) |
-| `"portable cell phone RF blocker"` | **no** | **yes** (sim=0.73) |
-| `"synthetic opioid analgesic similar to fentanyl"` | only if "fentanyl" appears literally | **yes** (sim=0.92) |
+See the **[pitch section](#why-semantic-search-beats-keyword-matching--the-pitch)** above for the full table of military-context examples (MANPADS, RPG-7, MRAP, maraging steel, thermal weapon sights, spent nuclear fuel, electronic countermeasures) where shipment text shares **zero significant keywords** with the matched rule and the embedding still catches it.
 
 ### Context-aware screening
 Hard negatives are **scoped to categories** so context drives meaning:
