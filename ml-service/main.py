@@ -26,6 +26,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,6 +37,7 @@ from pydantic import BaseModel, Field
 from classifier import (
     MODEL_NAME,
     UNCLASSIFIED_THRESHOLD_DEFAULT,
+    embed_texts,
     load_category_config,
     load_centroids,
     load_chapter_titles,
@@ -43,41 +45,58 @@ from classifier import (
     predict,
     predict_batch,
 )
+from compliance import apply_compliance, load_risk_profile, prepare_risk_vectors
 from db import close_pool, pooled_connection
 
 # ── App setup ──────────────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title="Shipment Classifier",
-    description="Multi-label NLP classification using sentence embeddings and pgvector.",
-    version="1.1.0",
-)
 
 # In-memory state refreshed on /reload
 centroids:       dict = {}
 keywords:        dict = {}
 category_config: dict = {}
 chapter_titles:  dict = {}
+risk_vectors:    dict = {}
 
 
-@app.on_event("startup")
-def startup() -> None:
-    global centroids, keywords, category_config, chapter_titles
+def _load_risk() -> dict:
+    """Load risk profile JSON and embed all phrases into vectors."""
+    profile = load_risk_profile()
+    vectors = prepare_risk_vectors(profile, embed_texts)
+    stats = vectors.get("_stats", {})
+    print(
+        f"Risk profile: {stats.get('global_entries', 0)} global blocked, "
+        f"{stats.get('category_entries', 0)} category hard negatives, "
+        f"{stats.get('total_vectors', 0)} total vectors embedded"
+    )
+    return vectors
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan: load DB-backed state + risk vectors on startup,
+    close the connection pool on shutdown."""
+    global centroids, keywords, category_config, chapter_titles, risk_vectors
     with pooled_connection() as conn:
         centroids       = load_centroids(conn)
         keywords        = load_keywords(conn)
         category_config = load_category_config(conn)
         chapter_titles  = load_chapter_titles(conn)
+    risk_vectors = _load_risk()
     print(
         f"Loaded {len(centroids)} category centroids "
         f"(chapter centroids total: {sum(len(v) for v in centroids.values())}), "
         f"{len(chapter_titles)} HS chapters, model={MODEL_NAME}"
     )
-
-
-@app.on_event("shutdown")
-def shutdown() -> None:
+    yield
     close_pool()
+
+
+app = FastAPI(
+    title="Shipment Classifier",
+    description="Multi-label NLP classification using sentence embeddings and pgvector.",
+    version="1.2.0",
+    lifespan=lifespan,
+)
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -141,7 +160,7 @@ def _persist_one(cur, shipment_id: str, result: dict, threshold: float) -> None:
     ))
 
 
-def _build_response(req: ClassifyRequest, result: dict) -> dict:
+def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None = None) -> dict:
     """Build the standard API response envelope."""
     scores_out = {
         cat: {k: v for k, v in s.items() if k != "embedding"}
@@ -173,6 +192,10 @@ def _build_response(req: ClassifyRequest, result: dict) -> dict:
     if result.get("quality"):
         response["result"]["quality"] = result["quality"]
 
+    # Compliance decision (semantic risk profile)
+    if compliance:
+        response["compliance"] = compliance
+
     return response
 
 
@@ -180,6 +203,7 @@ def _build_response(req: ClassifyRequest, result: dict) -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    stats = risk_vectors.get("_stats", {})
     return {
         "status":             "ok",
         "categories_loaded":  len(centroids),
@@ -189,6 +213,7 @@ def health() -> dict:
         "calibrated":         any(
             c.get("platt_a") is not None for c in category_config.values()
         ),
+        "risk_vectors":       stats.get("total_vectors", 0),
     }
 
 
@@ -205,6 +230,9 @@ def classify(req: ClassifyRequest) -> dict:
         chapter_titles=chapter_titles,
     )
 
+    # Semantic compliance decision (uses the shipment embedding)
+    compliance = apply_compliance(result, risk_vectors)
+
     if req.persist:
         try:
             with pooled_connection() as conn:
@@ -212,9 +240,6 @@ def classify(req: ClassifyRequest) -> dict:
                     _persist_one(cur, req.shipment_id, result, req.threshold)
                 conn.commit()
         except Exception as exc:
-            # Don't let a DB write failure break the classification response.
-            # The pooled_connection context ensures the connection returns to
-            # the pool; rollback is implicit on context exit for failed txns.
             print(f"WARNING: failed to persist {req.shipment_id}: {exc}")
             try:
                 with pooled_connection() as conn:
@@ -222,7 +247,7 @@ def classify(req: ClassifyRequest) -> dict:
             except Exception:
                 pass
 
-    return _build_response(req, result)
+    return _build_response(req, result, compliance=compliance)
 
 
 @app.post("/classify/batch")
@@ -245,6 +270,12 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
         chapter_titles=chapter_titles,
     )
 
+    # Semantic compliance decisions (reuses each shipment's embedding)
+    compliance_results = [
+        apply_compliance(results[i], risk_vectors)
+        for i in range(len(shipments))
+    ]
+
     # Persist (single transaction for the whole batch).
     persist_indices = [i for i, s in enumerate(shipments) if s.persist]
     if persist_indices:
@@ -262,18 +293,23 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
             except Exception:
                 pass
 
-    return [_build_response(shipments[i], results[i]) for i in range(len(shipments))]
+    return [
+        _build_response(shipments[i], results[i], compliance=compliance_results[i])
+        for i in range(len(shipments))
+    ]
 
 
 @app.post("/reload")
 def reload() -> dict:
-    """Reload centroids, keywords, chapter titles, and per-category config from DB."""
-    global centroids, keywords, category_config, chapter_titles
+    """Reload centroids, keywords, chapter titles, per-category config, and risk vectors."""
+    global centroids, keywords, category_config, chapter_titles, risk_vectors
     with pooled_connection() as conn:
         centroids       = load_centroids(conn)
         keywords        = load_keywords(conn)
         category_config = load_category_config(conn)
         chapter_titles  = load_chapter_titles(conn)
+    risk_vectors = _load_risk()
+    stats = risk_vectors.get("_stats", {})
     return {
         "status":             "reloaded",
         "categories_loaded":  len(centroids),
@@ -282,4 +318,9 @@ def reload() -> dict:
         "calibrated":         any(
             c.get("platt_a") is not None for c in category_config.values()
         ),
+        "risk_profile": {
+            "global_entries":    stats.get("global_entries", 0),
+            "category_entries":  stats.get("category_entries", 0),
+            "total_vectors":     stats.get("total_vectors", 0),
+        },
     }
