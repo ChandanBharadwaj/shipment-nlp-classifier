@@ -12,21 +12,26 @@ This means:
   - "armored" / "armoured" / "armor-plated" are naturally similar vectors
   - No duplicated entries for spelling variants
 
+Both shipment text and risk phrases pass through ``preprocess.normalize`` before
+embedding so the two distributions stay aligned. The original phrase text is
+preserved for audit output.
+
 Schema (risk_profile.json):
   - default_thresholds: {block: float, review: float}
   - global_blocked: list of {phrase, aliases?, risky: true, reason}
-        Every global entry is unconditionally treated as a block on match.
-        The `risky: true` flag is required to make the intent explicit.
+        Every global entry is unconditionally treated as risky on match.
   - categories: dict of {risk_level, hard_negatives: list of {phrase, aliases?, action, reason}}
-        Category entries use action ∈ {"block", "review"}.
+        Category entries use action ∈ {"block", "review"} which both feed into
+        the single ``is_risky`` boolean returned to callers; the action is
+        retained internally so audit reasons can describe severity.
 
 Decision cascade (evaluated top-to-bottom, first match wins):
-    1. Global blocked phrase hit (cosine >= block_threshold) -> block
-    2. Category hard-negative hit (action=block, cosine >= review_threshold) -> block
-    3. Category hard-negative hit (action=review, cosine >= review_threshold) -> review
-    4. risk_level=high (any confidence) -> review
-    5. confidence_state=unclassified or low_confidence -> review
-    6. risk_level=medium or low + classified -> allow
+    1. Global blocked phrase hit (cosine >= block_threshold) -> risky
+    2. Category hard-negative hit (action=block, cosine >= review_threshold) -> risky
+    3. Category hard-negative hit (action=review, cosine >= review_threshold) -> risky
+    4. risk_level=high (any confidence) -> risky
+    5. confidence_state=unclassified or low_confidence -> risky
+    6. risk_level=medium or low + classified -> not risky
 
 Usage::
 
@@ -35,6 +40,7 @@ Usage::
     profile = load_risk_profile()
     risk_vectors = prepare_risk_vectors(profile, embed_fn)
     decision = apply_compliance(classifier_result, risk_vectors)
+    # decision["is_risky"] -> bool
 """
 
 from __future__ import annotations
@@ -44,6 +50,8 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+
+from preprocess import normalize as _normalize_text
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -116,17 +124,35 @@ def _embed_entries(
     """
     Embed each entry's phrase + aliases into vectors.
 
+    Phrases are passed through ``preprocess.normalize`` before embedding so the
+    risk distribution matches the shipment-text distribution at inference time.
+    Original (un-normalized) text is preserved on the entry under
+    ``_display_texts`` for audit output.
+
+    Empty post-normalization variants are dropped (they would be near-duplicates
+    of every other text in embedding space and produce false positives).
+
     Returns ``(enriched_entries, total_vector_count)``. Phrase + aliases for
     every entry are batched into a single embed call.
     """
     all_texts: list[str] = []
-    entry_spans: list[tuple[int, int]] = []  # (start_idx, count) per entry
+    entry_spans: list[tuple[int, int]] = []   # (start_idx, count) per entry
+    entry_displays: list[list[str]] = []      # original text aligned with _vectors
 
     for entry in entries:
-        texts = [entry["phrase"]] + entry.get("aliases", [])
+        originals = [entry["phrase"]] + entry.get("aliases", [])
+        kept_orig: list[str] = []
+        kept_norm: list[str] = []
+        for orig in originals:
+            norm = _normalize_text(orig)
+            if not norm:
+                continue
+            kept_orig.append(orig)
+            kept_norm.append(norm)
         start = len(all_texts)
-        all_texts.extend(texts)
-        entry_spans.append((start, len(texts)))
+        all_texts.extend(kept_norm)
+        entry_spans.append((start, len(kept_norm)))
+        entry_displays.append(kept_orig)
 
     if not all_texts:
         return entries, 0
@@ -138,7 +164,11 @@ def _embed_entries(
     for i, entry in enumerate(entries):
         start, count = entry_spans[i]
         vectors = all_vectors[start : start + count]  # (count, dim)
-        enriched.append({**entry, "_vectors": vectors})
+        enriched.append({
+            **entry,
+            "_vectors": vectors,
+            "_display_texts": entry_displays[i],
+        })
         n_vectors += vectors.shape[0]
 
     return enriched, n_vectors
@@ -210,10 +240,15 @@ def _match_entries(
         best_idx = int(sims.argmax())
 
         if max_sim >= threshold:
-            all_texts = [entry["phrase"]] + entry.get("aliases", [])
+            # Prefer the display-text list aligned with _vectors. Fall back to
+            # phrase+aliases for any entry that pre-dates the display-text field.
+            display_texts = entry.get("_display_texts") or (
+                [entry["phrase"]] + entry.get("aliases", [])
+            )
+            matched = display_texts[best_idx] if best_idx < len(display_texts) else entry["phrase"]
             hits.append({
                 "phrase":       entry["phrase"],
-                "matched_text": all_texts[best_idx],
+                "matched_text": matched,
                 "similarity":   round(max_sim, 4),
                 "category":     category,
                 "action":       force_action or entry["action"],
@@ -254,10 +289,12 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
     Returns
     -------
     dict with keys:
-        compliance_decision : str   -- "allow", "review", or "block"
-        decision_reasons    : list[str]
-        hard_negative_hits  : list[dict]
-        risk_levels         : dict[str, str]
+        is_risky           : bool   -- True if any risk signal triggered
+                                       (semantic match, high-risk category,
+                                       low confidence, or unclassified)
+        decision_reasons   : list[str]
+        hard_negative_hits : list[dict]
+        risk_levels        : dict[str, str]
     """
     embedding    = classifier_result.get("embedding")
     categories   = classifier_result.get("categories", [])
@@ -279,7 +316,7 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
             emb_dim = np.asarray(embedding).shape[-1]
             if sample.shape[1] != emb_dim:
                 return {
-                    "compliance_decision": "review",
+                    "is_risky": True,
                     "decision_reasons": [
                         f"embedding dim {emb_dim} != risk vector dim "
                         f"{sample.shape[1]}; semantic check skipped"
@@ -293,7 +330,7 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
         if conf_state in ("low_confidence", "unclassified"):
             reasons.append(f"confidence_state={conf_state}")
             return {
-                "compliance_decision": "review",
+                "is_risky": True,
                 "decision_reasons": reasons,
                 "hard_negative_hits": [],
                 "risk_levels": risk_levels,
@@ -302,14 +339,14 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
         if high_risk:
             reasons.append(f"high-risk category: {', '.join(sorted(high_risk))}")
             return {
-                "compliance_decision": "review",
+                "is_risky": True,
                 "decision_reasons": reasons,
                 "hard_negative_hits": [],
                 "risk_levels": risk_levels,
             }
         reasons.append("classified (no embedding for semantic check)")
         return {
-            "compliance_decision": "allow",
+            "is_risky": False,
             "decision_reasons": reasons,
             "hard_negative_hits": [],
             "risk_levels": risk_levels,
@@ -366,13 +403,13 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
                 f"{h['reason']}"
             )
         return {
-            "compliance_decision": "block",
+            "is_risky": True,
             "decision_reasons": reasons,
             "hard_negative_hits": all_hits,
             "risk_levels": risk_levels,
         }
 
-    # 2. Any review-action hit -> REVIEW
+    # 2. Any review-action hit -> RISKY
     review_hits = [h for h in all_hits if h["action"] == "review"]
     if review_hits:
         for h in review_hits:
@@ -381,40 +418,40 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
                 f"(sim={h['similarity']:.3f}): {h['reason']}"
             )
         return {
-            "compliance_decision": "review",
+            "is_risky": True,
             "decision_reasons": reasons,
             "hard_negative_hits": all_hits,
             "risk_levels": risk_levels,
         }
 
-    # 3. High-risk category -> REVIEW
+    # 3. High-risk category -> RISKY
     high_risk_cats = [c for c, rl in risk_levels.items() if rl == "high"]
     if high_risk_cats:
         reasons.append(f"high-risk category: {', '.join(sorted(high_risk_cats))}")
         return {
-            "compliance_decision": "review",
+            "is_risky": True,
             "decision_reasons": reasons,
             "hard_negative_hits": all_hits,
             "risk_levels": risk_levels,
         }
 
-    # 4. Low confidence or unclassified -> REVIEW
+    # 4. Low confidence or unclassified -> RISKY
     if conf_state in ("low_confidence", "unclassified"):
         reasons.append(f"confidence_state={conf_state}")
         return {
-            "compliance_decision": "review",
+            "is_risky": True,
             "decision_reasons": reasons,
             "hard_negative_hits": all_hits,
             "risk_levels": risk_levels,
         }
 
-    # 5. Classified + medium/low risk -> ALLOW
+    # 5. Classified + medium/low risk -> NOT RISKY
     reasons.append(
         f"classified with confidence, risk_level(s): "
         f"{', '.join(f'{c}={rl}' for c, rl in sorted(risk_levels.items()))}"
     )
     return {
-        "compliance_decision": "allow",
+        "is_risky": False,
         "decision_reasons": reasons,
         "hard_negative_hits": all_hits,
         "risk_levels": risk_levels,

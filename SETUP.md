@@ -200,9 +200,9 @@ curl -X POST http://localhost:8000/classify ^
   -d "{\"shipment_id\": \"s1\", \"cargo_description\": \"LEGO building blocks educational toy\", \"commodity_description\": \"plastic toys 500 pieces\"}"
 ```
 
-Look for `"compliance_decision": "allow"` in the response.
+Look for `"is_risky": false` in the response.
 
-### Classify + compliance — risky shipment (should BLOCK)
+### Classify + compliance — risky shipment (should be flagged)
 
 ```bash
 curl -X POST http://localhost:8000/classify ^
@@ -210,7 +210,7 @@ curl -X POST http://localhost:8000/classify ^
   -d "{\"shipment_id\": \"s2\", \"cargo_description\": \"depleted uranium fuel rods\", \"commodity_description\": \"nuclear material reactor grade\"}"
 ```
 
-Look for `"compliance_decision": "block"` and a `decision_reasons` entry citing the IAEA-controlled phrase match.
+Look for `"is_risky": true` and a `decision_reasons` entry citing the IAEA-controlled phrase match.
 
 > **Windows curl note:** the `^` is line continuation in `cmd`. In PowerShell use a backtick `` ` ``. In bash use `\`.
 
@@ -270,7 +270,7 @@ python init_db.py
 ### Slow first request to `/classify`
 The `sentence-transformers` model lazy-loads on first use. First request takes 5-10 seconds; subsequent requests are <100 ms.
 
-### `compliance_decision` is missing from the response
+### `is_risky` is missing from the response
 Check the startup logs — if you don't see the `Risk profile: 12 global blocked, 79 category hard negatives, 359 total vectors embedded` line, the JSON file is malformed. The validator will print the offending entry. Fix `risk_profile.json` and call `POST /reload`.
 
 ### Port 8000 already in use

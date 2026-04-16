@@ -55,8 +55,7 @@ GENERIC_TOKENS: frozenset[str] = frozenset({
     "as", "per", "invoice", "the", "a", "an",
 })
 
-_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
-_TOKEN_RE    = re.compile(r"\w+")
+_TOKEN_RE = re.compile(r"\w+")
 
 # Model is loaded once at module import. For BGE-small-en-v1.5 this is ~130MB
 # and takes ~3-5s on first run, near-instant afterwards (HF cache).

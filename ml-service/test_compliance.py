@@ -38,9 +38,10 @@ def main():
     passed = 0
     failed = 0
 
-    def check(label, decision, expected_decision, expect_reasons_contain=None):
+    def check(label, decision, expected_is_risky, expect_reasons_contain=None):
+        """expected_is_risky is a bool: True for previously block/review, False for allow."""
         nonlocal passed, failed
-        ok = decision["compliance_decision"] == expected_decision
+        ok = decision["is_risky"] == expected_is_risky
         reason_ok = True
         if expect_reasons_contain:
             reason_text = " ".join(decision["decision_reasons"])
@@ -48,14 +49,14 @@ def main():
                 reason_ok = False
         if ok and reason_ok:
             passed += 1
-            print(f"  PASS  {label} -> {decision['compliance_decision']}")
+            print(f"  PASS  {label} -> is_risky={decision['is_risky']}")
             # Show similarity if there are hits
             for h in decision.get("hard_negative_hits", []):
                 print(f"        hit: '{h['phrase']}' (sim={h['similarity']:.3f}, matched='{h['matched_text']}')")
         else:
             failed += 1
             print(f"  FAIL  {label}")
-            print(f"        expected: {expected_decision}, got: {decision['compliance_decision']}")
+            print(f"        expected is_risky={expected_is_risky}, got: {decision['is_risky']}")
             print(f"        reasons: {decision['decision_reasons']}")
             for h in decision.get("hard_negative_hits", []):
                 print(f"        hit: '{h['phrase']}' (sim={h['similarity']:.3f})")
@@ -74,119 +75,119 @@ def main():
     print("\n1. Global blocked -- exact phrasing")
     emb = embed("depleted uranium fuel rods for nuclear reactor")
     d = apply_compliance(_fake_result(["energy"], "classified", emb), risk_vectors)
-    check("depleted uranium -> block", d, "block", "nuclear material")
+    check("depleted uranium -> risky", d, True, "nuclear material")
 
     emb = embed("cluster munition bomblet dispenser weapon")
     d = apply_compliance(_fake_result(["defense"], "classified", emb), risk_vectors)
-    check("cluster munition -> block", d, "block", "prohibited weapon")
+    check("cluster munition -> risky", d, True, "prohibited weapon")
 
     # -- 2. Global blocked (paraphrased -- the semantic test)
     print("\n2. Global blocked -- paraphrased (semantic matching)")
     emb = embed("spent nuclear fuel rods radioactive waste shipment")
     d = apply_compliance(_fake_result(["energy"], "classified", emb), risk_vectors)
-    check("spent nuclear fuel (paraphrase of depleted uranium)", d, "block")
+    check("spent nuclear fuel (paraphrase of depleted uranium)", d, True)
 
     emb = embed("portable cell phone RF blocker device")
     d = apply_compliance(_fake_result(["electronics"], "classified", emb), risk_vectors)
-    check("cell phone RF blocker (paraphrase of signal jammer)", d, "block")
+    check("cell phone RF blocker (paraphrase of signal jammer)", d, True)
 
     # -- 3. Category hard negative (block action)
     print("\n3. Category hard negatives (block)")
     emb = embed("500 vials fentanyl citrate injection 50mcg per mL")
     d = apply_compliance(_fake_result(["pharmaceuticals"], "classified", emb), risk_vectors)
-    check("pharma + fentanyl -> block", d, "block", "narcotic")
+    check("pharma + fentanyl -> risky", d, True, "narcotic")
 
     emb = embed("carved elephant ivory tusk decorative art piece")
     d = apply_compliance(_fake_result(["luxury"], "classified", emb), risk_vectors)
-    check("luxury + ivory -> block", d, "block", "CITES")
+    check("luxury + ivory -> risky", d, True, "CITES")
 
     emb = embed("uranium ore concentrate pitchblende mineral")
     d = apply_compliance(_fake_result(["minerals"], "classified", emb), risk_vectors)
-    check("minerals + uranium ore -> block", d, "block", "nuclear")
+    check("minerals + uranium ore -> risky", d, True, "nuclear")
 
     # -- 4. Category hard negative (review action)
     print("\n4. Category hard negatives (review)")
     emb = embed("acetic anhydride industrial chemical drums 200L")
     d = apply_compliance(_fake_result(["chemicals"], "classified", emb), risk_vectors)
-    check("chemicals + acetic anhydride -> review", d, "review")
+    check("chemicals + acetic anhydride -> risky", d, True)
 
     emb = embed("hardware encryption module AES-256 network security")
     d = apply_compliance(_fake_result(["electronics"], "classified", emb), risk_vectors)
-    check("electronics + encryption -> review", d, "review")
+    check("electronics + encryption -> risky", d, True)
 
     emb = embed("5-axis CNC vertical machining center precision milling")
     d = apply_compliance(_fake_result(["machinery"], "classified", emb), risk_vectors)
-    check("machinery + 5-axis CNC -> review", d, "review")
+    check("machinery + 5-axis CNC -> risky", d, True)
 
     emb = embed("rosewood timber dalbergia logs hardwood")
     d = apply_compliance(_fake_result(["furniture"], "classified", emb), risk_vectors)
-    check("furniture + rosewood -> review", d, "review", "CITES")
+    check("furniture + rosewood -> risky", d, True, "CITES")
 
     # -- 5. Category hard negative (semantic paraphrase)
     print("\n5. Category hard negatives -- paraphrased")
     emb = embed("synthetic opioid analgesic similar to fentanyl potent narcotic")
     d = apply_compliance(_fake_result(["pharmaceuticals"], "classified", emb), risk_vectors)
-    check("pharma + opioid analog (paraphrase) -> block", d, "block")
+    check("pharma + opioid analog (paraphrase) -> risky", d, True)
 
     emb = embed("advanced semiconductor high-performance compute chip AI training")
     d = apply_compliance(_fake_result(["electronics"], "classified", emb), risk_vectors)
-    check("electronics + advanced chip (paraphrase of FPGA) -> review", d, "review")
+    check("electronics + advanced chip (paraphrase of FPGA) -> risky", d, True)
 
     # -- 6. High-risk category (no hard neg hit)
     print("\n6. High-risk category (no hard negatives triggered)")
     emb = embed("sporting rifle ammunition 308 winchester 500 rounds")
     d = apply_compliance(_fake_result(["defense"], "classified", emb), risk_vectors)
     # Defense is high risk, so even without hard neg hit -> review
-    check("defense (high risk, no neg) -> review", d, "review", "high-risk")
+    check("defense (high risk, no neg) -> risky", d, True, "high-risk")
 
     emb = embed("sodium chloride industrial salt 25kg bags bulk")
     d = apply_compliance(_fake_result(["chemicals"], "classified", emb), risk_vectors)
-    check("chemicals (high risk, clean cargo) -> review", d, "review", "high-risk")
+    check("chemicals (high risk, clean cargo) -> risky", d, True, "high-risk")
 
     # -- 7. Low confidence / unclassified -> REVIEW
     print("\n7. Low confidence / unclassified")
     emb = embed("assorted plastic items miscellaneous")
     d = apply_compliance(_fake_result(["toys"], "low_confidence", emb), risk_vectors)
-    check("low_confidence -> review", d, "review", "confidence_state")
+    check("low_confidence -> risky", d, True, "confidence_state")
 
     d = apply_compliance(
         _fake_result([], "unclassified", None, scores={"toys": {"final_score": 0.2}}),
         risk_vectors,
     )
-    check("unclassified (no embedding) -> review", d, "review", "confidence_state")
+    check("unclassified (no embedding) -> risky", d, True, "confidence_state")
 
     # -- 8. Classified + low/medium risk -> ALLOW
     print("\n8. Classified + low/medium risk -> ALLOW")
     emb = embed("LEGO building blocks children educational toy set 500 pieces")
     d = apply_compliance(_fake_result(["toys"], "classified", emb), risk_vectors)
-    check("toys (low risk, classified) -> allow", d, "allow")
+    check("toys (low risk, classified) -> not risky", d, False)
 
     emb = embed("solid oak dining table with 6 matching chairs wooden furniture")
     d = apply_compliance(_fake_result(["furniture"], "classified", emb), risk_vectors)
-    check("furniture (low risk, classified) -> allow", d, "allow")
+    check("furniture (low risk, classified) -> not risky", d, False)
 
     emb = embed("cotton t-shirts men assorted sizes knitted garments 3000 pcs")
     d = apply_compliance(_fake_result(["textiles"], "classified", emb), risk_vectors)
-    check("textiles (low risk, classified) -> allow", d, "allow")
+    check("textiles (low risk, classified) -> not risky", d, False)
 
     emb = embed("USB cables type-C braided 1 meter 2000 pcs")
     d = apply_compliance(_fake_result(["electronics"], "classified", emb), risk_vectors)
-    check("electronics (medium risk, clean) -> allow", d, "allow")
+    check("electronics (medium risk, clean) -> not risky", d, False)
 
     emb = embed("fresh atlantic salmon fillets chilled seafood")
     d = apply_compliance(_fake_result(["perishables"], "classified", emb), risk_vectors)
-    check("perishables (low risk, clean) -> allow", d, "allow")
+    check("perishables (low risk, clean) -> not risky", d, False)
 
     # -- 9. Multi-label mixed risk
     print("\n9. Multi-label edge cases")
     emb = embed("airsoft replica rifle spring powered toy gun")
     d = apply_compliance(_fake_result(["toys", "defense"], "classified", emb), risk_vectors)
     # review via either the toys hard negative (misclassified weapon) or defense high-risk path
-    check("toys+defense -> review", d, "review")
+    check("toys+defense -> risky", d, True)
 
     emb = embed("dried cereal grains wheat barley bulk agricultural")
     d = apply_compliance(_fake_result(["food_beverages", "agriculture"], "classified", emb), risk_vectors)
-    check("food+agriculture (both low) -> allow", d, "allow")
+    check("food+agriculture (both low) -> not risky", d, False)
 
     # -- Summary
     print(f"\n{'=' * 70}")

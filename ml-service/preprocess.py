@@ -1,14 +1,18 @@
 """
 Text preprocessing for shipment descriptions.
 
-Applied identically at centroid build time and inference time so centroids
-and queries share the same normalized distribution.
+Applied identically at centroid build time, inference time, AND when embedding
+risk phrases for the compliance screen — so centroids, queries, and risk
+vectors all share the same normalized distribution.
 
 Scope (deliberately conservative):
+    - NFKC Unicode normalization (collapse fullwidth/ligatures/compatibility)
     - lowercase
     - strip shipping boilerplate (pallets, container sizes, SKU codes, HS codes,
       "as per invoice", etc.)
+    - normalize units of measure / quantity tokens (kg, pcs, ctn, plt, …)
     - expand a small set of common shipping-industry abbreviations
+    - collapse runs of 3+ identical consecutive tokens
     - collapse whitespace
 
 Not done:
@@ -17,11 +21,14 @@ Not done:
       test.
     - stemming/lemmatization — handled instead at keyword-match time where it
       matters most (see classifier.keyword_score).
+
+Idempotency invariant: normalize(normalize(x)) == normalize(x).
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # ── Boilerplate removal ───────────────────────────────────────────────────────
 # Each entry is a compiled regex that gets substituted with a single space.
@@ -45,16 +52,24 @@ _BOILERPLATE_PATTERNS: list[re.Pattern] = [
 # ── Abbreviation expansion ────────────────────────────────────────────────────
 # Small hand-curated list — the goal is to rescue obvious misses, not build a
 # full synonym graph. Expanded form is what the embedding model was trained on.
+#
+# Includes shipping UoM / quantity tokens (pcs, kg, ctn, plt, …). Single-letter
+# units (g, t, l) are NOT here because they would mangle prose; those live in
+# `_UOM_DIGIT_GUARDED` and only match when prefixed by a digit.
 _ABBREVIATIONS: dict[str, str] = {
+    # Cargo handling
     "refr":       "refrigerated",
     "refrig":     "refrigerated",
     "frz":        "frozen",
+    # Sectors / domains
     "elec":       "electronic",
     "electr":     "electronic",
     "pharma":     "pharmaceutical",
     "pharm":      "pharmaceutical",
     "choco":      "chocolate",
+    # Manufacturing
     "mfg":        "manufactured",
+    "mfd":        "manufactured",
     "mfr":        "manufacturer",
     "assy":       "assembly",
     "comp":       "component",
@@ -69,18 +84,99 @@ _ABBREVIATIONS: dict[str, str] = {
     "veh":        "vehicle",
     "agri":       "agriculture",
     "prod":       "product",
-    "mfd":        "manufactured",
+    # Materials shorthand
     "ss":         "stainless steel",
     "ms":         "mild steel",
+    "alu":        "aluminum",
+    "alum":       "aluminum",
+    "galv":       "galvanized",
+    # UoM / quantity tokens (multi-letter, safe everywhere)
+    "pcs":        "pieces",
+    "pc":         "pieces",
+    "kgs":        "kilograms",
+    "kg":         "kilograms",
+    "mt":         "metric tons",
+    "mts":        "metric tons",
+    "lbs":        "pounds",
+    "lb":         "pounds",
+    "oz":         "ounces",
+    "ltr":        "liters",
+    "ltrs":       "liters",
+    "ml":         "milliliters",
+    "gal":        "gallons",
+    "gals":       "gallons",
+    "qty":        "quantity",
+    "nos":        "numbers",
+    "ea":         "each",
+    "doz":        "dozen",
+    "ctn":        "carton",
+    "ctns":       "cartons",
+    "plt":        "pallet",
+    "plts":       "pallets",
+    "pkg":        "package",
+    "pkgs":       "packages",
+    "nw":         "net weight",
+    "gw":         "gross weight",
 }
 
 # Compile once: `\b(refr|refrig|…)\b` with case-insensitive matching.
+# Sorted longest-first so multi-char keys win over their substrings.
 _ABBREV_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(k) for k in sorted(_ABBREVIATIONS, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
 
+# Single-letter UoM that ONLY make sense when attached to a number, e.g. "500g",
+# "2t", "5l". Plain "g"/"t"/"l" elsewhere is prose and must not be touched.
+# Pattern: capture the digits, then the unit; rewrite as "<digits> <expansion>".
+_UOM_DIGIT_GUARDED: dict[str, str] = {
+    "g":  "grams",
+    "t":  "metric tons",
+    "l":  "liters",
+}
+_UOM_DIGIT_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(" + "|".join(_UOM_DIGIT_GUARDED) + r")\b",
+    re.IGNORECASE,
+)
+
 _WS_PATTERN = re.compile(r"\s+")
+
+
+def _expand_uom_digit_guarded(match: re.Match) -> str:
+    digits = match.group(1)
+    unit = match.group(2).lower()
+    return f"{digits} {_UOM_DIGIT_GUARDED[unit]}"
+
+
+def _dedupe_consecutive(text: str) -> str:
+    """
+    Collapse runs of 3+ identical consecutive tokens to a single occurrence.
+
+    Shipment descriptions often contain `pallets pallets pallets` style noise
+    from concatenated manifests. A run of 2 may be intentional ("very very"),
+    but 3+ is almost always boilerplate repetition.
+
+    Idempotent: applying twice is a no-op (a single token never matches).
+    """
+    if not text:
+        return text
+    tokens = text.split(" ")
+    if len(tokens) < 3:
+        return text
+    out: list[str] = []
+    run_token: str | None = None
+    run_len = 0
+    for tok in tokens:
+        if tok == run_token:
+            run_len += 1
+            if run_len <= 2:
+                out.append(tok)
+            # else: drop; we've already emitted two
+        else:
+            run_token = tok
+            run_len = 1
+            out.append(tok)
+    return " ".join(out)
 
 
 def normalize(text: str) -> str:
@@ -92,17 +188,29 @@ def normalize(text: str) -> str:
     if not text:
         return ""
 
-    s = text.lower()
+    # Unicode compatibility normalization (fullwidth → ascii, ligatures, etc.)
+    s = unicodedata.normalize("NFKC", text)
+
+    s = s.lower()
 
     # Boilerplate removal
     for pat in _BOILERPLATE_PATTERNS:
         s = pat.sub(" ", s)
 
-    # Abbreviation expansion
+    # Digit-guarded single-letter UoM (must run before whitespace collapse so
+    # patterns like "500 g" still match after the digit).
+    s = _UOM_DIGIT_PATTERN.sub(_expand_uom_digit_guarded, s)
+
+    # Multi-letter abbreviation expansion
     s = _ABBREV_PATTERN.sub(lambda m: _ABBREVIATIONS[m.group(1).lower()], s)
 
     # Collapse whitespace
     s = _WS_PATTERN.sub(" ", s).strip()
+
+    # Drop runs of 3+ identical tokens (after whitespace collapse so token
+    # boundaries are clean)
+    s = _dedupe_consecutive(s)
+
     return s
 
 

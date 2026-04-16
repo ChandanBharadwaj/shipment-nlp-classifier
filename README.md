@@ -216,7 +216,7 @@ POST /classify
     "scores": {...}
   },
   "compliance": {
-    "compliance_decision": "block",
+    "is_risky": true,
     "decision_reasons": [
       "semantic match 'depleted uranium nuclear material' (global, sim=0.842, matched='spent nuclear fuel rods'): nuclear material — IAEA controlled"
     ],
