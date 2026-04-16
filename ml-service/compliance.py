@@ -222,30 +222,40 @@ def _match_entries(
     force_action: str | None = None,
 ) -> list[dict]:
     """
-    Compare a shipment embedding against a list of risk entries.
+    Compare a shipment embedding (or multi-chunk matrix) against risk entries.
 
-    For each entry, compute max cosine across its phrase + alias vectors.
-    Returns hits that exceed the threshold. If ``force_action`` is provided
-    (e.g., "block" for global entries), it overrides the entry's action.
+    ``embedding`` may be a single ``(dim,)`` vector (single-chunk / legacy
+    caller) or a ``(n_chunks, dim)`` matrix (multi-chunk). Either way we
+    compute max cosine across both the entry's phrase+alias vectors AND the
+    chunk axis, so a risk phrase that only appears in chunk 7 still surfaces.
+
+    Returns hits exceeding ``threshold``. Each hit records the originating
+    ``chunk_idx`` for audit; for single-vector callers, chunk_idx is 0.
     """
+    # Normalize to a 2-D matrix of shape (n_chunks, dim).
+    M = np.atleast_2d(embedding)  # (n_chunks, dim)
+
     hits = []
     for entry in entries:
         vectors = entry.get("_vectors")
         if vectors is None or len(vectors) == 0:
             continue
 
-        # Cosine similarities (vectors and embedding are L2-normalized)
-        sims = vectors @ embedding  # (k,)
+        # Cosine similarities across (phrase x chunk). Both sides L2-normalized.
+        sims = vectors @ M.T                    # (k, n_chunks)
         max_sim = float(sims.max())
-        best_idx = int(sims.argmax())
 
         if max_sim >= threshold:
+            ph_idx, ch_idx = np.unravel_index(int(sims.argmax()), sims.shape)
             # Prefer the display-text list aligned with _vectors. Fall back to
-            # phrase+aliases for any entry that pre-dates the display-text field.
+            # phrase+aliases for entries that pre-date the display-text field.
             display_texts = entry.get("_display_texts") or (
                 [entry["phrase"]] + entry.get("aliases", [])
             )
-            matched = display_texts[best_idx] if best_idx < len(display_texts) else entry["phrase"]
+            matched = (
+                display_texts[ph_idx] if ph_idx < len(display_texts)
+                else entry["phrase"]
+            )
             hits.append({
                 "phrase":       entry["phrase"],
                 "matched_text": matched,
@@ -253,6 +263,7 @@ def _match_entries(
                 "category":     category,
                 "action":       force_action or entry["action"],
                 "reason":       entry["reason"],
+                "chunk_idx":    int(ch_idx),
             })
 
     return hits
@@ -295,8 +306,19 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
         decision_reasons   : list[str]
         hard_negative_hits : list[dict]
         risk_levels        : dict[str, str]
+
+    Notes
+    -----
+    If ``classifier_result`` contains ``chunk_embeddings`` (a 2-D matrix of
+    per-chunk vectors), every chunk is screened against every risk vector and
+    the best chunk wins per phrase. Hits carry a ``chunk_idx`` for audit and
+    are deduplicated by ``(phrase, category)`` keeping the highest similarity.
+    Without ``chunk_embeddings``, the function falls back to ``embedding`` —
+    backward compatible with all pre-chunking callers and tests.
     """
-    embedding    = classifier_result.get("embedding")
+    # Prefer multi-chunk matrix when present; else single-vector fallback.
+    chunk_matrix = classifier_result.get("chunk_embeddings")
+    embedding    = chunk_matrix if chunk_matrix is not None else classifier_result.get("embedding")
     categories   = classifier_result.get("categories", [])
     conf_state   = classifier_result.get("confidence_state", "unclassified")
     cat_profiles = risk_vectors.get("categories", {})
@@ -313,6 +335,7 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
     if embedding is not None:
         sample = _sample_risk_vector(risk_vectors)
         if sample is not None:
+            # .shape[-1] is the embedding dim for both 1-D and 2-D inputs.
             emb_dim = np.asarray(embedding).shape[-1]
             if sample.shape[1] != emb_dim:
                 return {

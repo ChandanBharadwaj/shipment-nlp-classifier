@@ -117,6 +117,9 @@ A pure global blocklist can't make these distinctions.
 ### Zero extra inference cost
 The shipment is encoded **once** by `all-MiniLM-L6-v2`. The classifier and compliance layer both consume that single 384-dim vector. Compliance adds only a `(N, 384) @ (384,)` matrix multiplication against ~360 pre-computed risk vectors — that's microseconds.
 
+### Long-input safety: automatic chunking
+Sentence-transformer models silently truncate inputs past `max_seq_length` (256 tokens for MiniLM). A 2,000-token manifest with `depleted uranium` in the final sentence would be classified, scored, and approved — the risk phrase never reaching `apply_compliance`. We close that hole with token-aware chunking: long inputs are split at sentence boundaries into model-fitting windows (with 32-token overlap), each chunk is embedded, classification picks the winning chunk per category (preserving `final_score == sw·sem + kw·kw`), and compliance scores **every** chunk against the risk vectors so a tail-buried phrase still surfaces. Short inputs (the common case) take a zero-overhead fast path. The response carries `meta.chunks_processed` for observability — `> 1` indicates the input exceeded the context window and was chunked.
+
 ### CPU-viable throughput
 Measured on a modern CPU:
 - Embedding: ~1,000-2,000 texts/sec at batch_size=512
@@ -183,8 +186,10 @@ shipment-nlp-classifier/
 │   │                            /reload, /health
 │   ├── classifier.py          ← embedding, scoring, calibration, confidence
 │   ├── compliance.py          ← semantic compliance decision layer ★
+│   ├── chunking.py            ← token-aware long-input splitter ★
 │   ├── risk_profile.json      ← global + per-category risk phrases ★
 │   ├── test_compliance.py     ← 24 smoke tests ★
+│   ├── test_chunking.py       ← 26 chunking + tail-risk tests ★
 │   ├── centroid_builder.py    ← rebuild centroids from labeled data
 │   ├── fit_calibration.py     ← Platt sigmoid calibration
 │   ├── evaluate_threshold.py  ← threshold tuning on validation/test splits

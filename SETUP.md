@@ -214,18 +214,39 @@ Look for `"is_risky": true` and a `decision_reasons` entry citing the IAEA-contr
 
 > **Windows curl note:** the `^` is line continuation in `cmd`. In PowerShell use a backtick `` ` ``. In bash use `\`.
 
+### Long-input safety — buried tail risk (chunking proof)
+
+A 2,000-token manifest with the risk phrase in the **last sentence** would be silently truncated by single-shot embedding. The chunking layer catches it. Save this body to `tail_risk.json` (PowerShell handles big payloads better than `cmd`):
+
+```powershell
+$body = @{
+  shipment_id = "s3"
+  cargo_description = ("Industrial machinery components: hydraulic pumps, steel valves, ball bearings, conveyor belts, electric motors, pneumatic actuators. " * 60) + " Yellowcake uranium concentrate drums sealed for international transport. Plutonium fissile material in shielded containers. Depleted uranium nuclear material counterweights."
+  commodity_description = "minerals shipment manifest"
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/classify -ContentType "application/json" -Body $body
+```
+
+Look for:
+- `meta.chunks_processed > 1` (input was actually chunked)
+- `compliance.is_risky: true`
+- `compliance.hard_negative_hits[].chunk_idx > 0` (the hit came from a tail chunk, not chunk 0)
+
 ---
 
-## 11. Run the compliance test suite
+## 11. Run the test suites
 
 ```bash
 # Inside ml-service/ with venv active
 python test_compliance.py
+python test_chunking.py
 ```
 
-Expected: **`24 passed, 0 failed out of 24`**.
+Expected:
+- `test_compliance.py` → **`24 passed, 0 failed out of 24`** — every cascade path (global block, category block/review, semantic paraphrases, high-risk routing, low-confidence routing, allow path, multi-label edges).
+- `test_chunking.py` → **`26 passed, 0 failed out of 26`** — `chunk_text` unit behavior (fast path, sentence pack, word pack, hard cut, DoS cap), aggregation, the silent-truncation **baseline** (test 9 documents the bug), and the buried-tail-risk **catch** via per-chunk compliance (test 10 proves the fix).
 
-This test loads the embedding model and exercises every cascade path (global block, category block/review, semantic paraphrases, high-risk routing, low-confidence routing, allow path, multi-label edges) — no DB needed.
+Both load the embedding model but need no DB.
 
 ---
 

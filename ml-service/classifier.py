@@ -30,7 +30,6 @@ from __future__ import annotations
 import math
 import os
 import re
-import string
 from collections import defaultdict
 from typing import Iterable
 
@@ -38,6 +37,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize as sk_normalize
 
+from chunking import chunk_text
 from preprocess import build_query_text, normalize as preprocess_normalize
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -356,6 +356,68 @@ def _apply_bands(
     return matched, "classified", None
 
 
+# ── Chunk aggregation ─────────────────────────────────────────────────────────
+
+def _aggregate_chunk_scores(
+    per_chunk: list[dict],
+) -> tuple[dict, float, int]:
+    """
+    Combine per-chunk score dicts into one shipment-level score dict.
+
+    For each category, take the row from the chunk with the highest
+    ``final_score`` for that category — preserves the invariant
+    ``final_score == sw*sem + kw*kw`` (i.e. all sub-scores come from the
+    same chunk and aren't Frankenstein-merged across chunks). The only
+    union field is ``keywords_hit``: gathered from every chunk for audit
+    completeness.
+
+    Returns
+    -------
+    (aggregated_scores, max_final_score, overall_winner_chunk_idx)
+        ``overall_winner_chunk_idx`` is the index of the chunk that produced
+        the highest ``final_score`` across all categories. The caller uses it
+        to choose which chunk's embedding to retain on the result.
+    """
+    if not per_chunk:
+        return {}, -1.0, 0
+    if len(per_chunk) == 1:
+        scores = per_chunk[0]
+        max_score = max((s["final_score"] for s in scores.values()), default=-1.0)
+        return scores, max_score, 0
+
+    # Categories are identical across chunks (same centroids, same config).
+    categories = list(per_chunk[0].keys())
+    aggregated: dict[str, dict] = {}
+    overall_max = -1.0
+    overall_idx = 0
+
+    for cat in categories:
+        # Per-category: pick the chunk with the highest final_score.
+        best_idx = max(
+            range(len(per_chunk)),
+            key=lambda i: per_chunk[i][cat]["final_score"],
+        )
+        winning_row = dict(per_chunk[best_idx][cat])  # shallow copy
+
+        # Union keywords across chunks (audit completeness).
+        union_hits: list[str] = []
+        seen: set[str] = set()
+        for row_idx in range(len(per_chunk)):
+            for kw in per_chunk[row_idx][cat].get("keywords_hit", []):
+                if kw not in seen:
+                    seen.add(kw)
+                    union_hits.append(kw)
+        winning_row["keywords_hit"] = union_hits
+
+        aggregated[cat] = winning_row
+
+        if winning_row["final_score"] > overall_max:
+            overall_max = winning_row["final_score"]
+            overall_idx = best_idx
+
+    return aggregated, overall_max, overall_idx
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def predict(
@@ -397,20 +459,49 @@ def predict(
     text_for_embedding = build_query_text(cargo_description, commodity_description)
     text_for_keywords  = preprocess_normalize(f"{cargo_description} {commodity_description}")
 
-    embedding = embed_texts([text_for_embedding])[0]
+    chunks = chunk_text(text_for_embedding, model)
 
-    scores, max_score = _score_one(
-        text_for_keywords, embedding, centroids, keywords, category_config,
-        chapter_titles=chapter_titles,
-    )
+    if len(chunks) == 1:
+        # Fast path — byte-identical behavior to the pre-chunking version.
+        embedding = embed_texts([text_for_embedding])[0]
+        scores, max_score = _score_one(
+            text_for_keywords, embedding, centroids, keywords, category_config,
+            chapter_titles=chapter_titles,
+        )
+        matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold)
+        return {
+            "categories":        matched,
+            "confidence_state":  state,
+            "reason":            reason,
+            "scores":            scores,
+            "embedding":         embedding,
+            "chunks_processed":  1,
+            "chunk_embeddings":  None,
+        }
+
+    # ── Multi-chunk path ─────────────────────────────────────────────────
+    chunk_embeddings = embed_texts(chunks)  # (n_chunks, dim)
+    per_chunk_scores: list[dict] = []
+    for i in range(len(chunks)):
+        s, _ = _score_one(
+            text_for_keywords, chunk_embeddings[i],
+            centroids, keywords, category_config,
+            chapter_titles=chapter_titles,
+        )
+        per_chunk_scores.append(s)
+
+    scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
     matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold)
+    embedding = chunk_embeddings[winner_idx]
 
     return {
-        "categories":       matched,
-        "confidence_state": state,
-        "reason":           reason,
-        "scores":           scores,
-        "embedding":        embedding,
+        "categories":        matched,
+        "confidence_state":  state,
+        "reason":            reason,
+        "scores":            scores,
+        "embedding":         embedding,
+        "chunks_processed":  len(chunks),
+        "chunk_embeddings":  chunk_embeddings,
     }
 
 
@@ -446,10 +537,13 @@ def predict_batch(
 
     results: list[dict | None] = [None] * n
     valid_indices: list[int] = []
-    embed_texts_list: list[str] = []
     keyword_texts_list: list[str] = []
+    # all_chunks is the flat list passed to ONE embed_texts call. row_chunk_spans
+    # lets us slice the resulting matrix back into per-row chunk groups.
+    all_chunks: list[str] = []
+    row_chunk_spans: list[tuple[int, int]] = []  # (start_offset, count) per valid row
 
-    # Quality gate + normalization
+    # Quality gate + normalization + chunking
     for i, (cargo, commodity) in enumerate(inputs_list):
         quality = text_quality_check(cargo, commodity)
         if quality != "ok":
@@ -460,39 +554,67 @@ def predict_batch(
                 "scores":           {},
                 "embedding":        None,
                 "quality":          quality,
+                "chunks_processed": 0,
+                "chunk_embeddings": None,
             }
             continue
         valid_indices.append(i)
-        embed_texts_list.append(build_query_text(cargo, commodity))
-        keyword_texts_list.append(
-            preprocess_normalize(f"{cargo} {commodity}")
-        )
+        text_for_embedding = build_query_text(cargo, commodity)
+        keyword_texts_list.append(preprocess_normalize(f"{cargo} {commodity}"))
+        chunks = chunk_text(text_for_embedding, model)
+        row_chunk_spans.append((len(all_chunks), len(chunks)))
+        all_chunks.extend(chunks)
 
-    # Single batched embed call for all valid rows
-    if embed_texts_list:
-        embeddings = embed_texts(embed_texts_list)
+    # Single batched embed call for ALL chunks across the entire batch.
+    if all_chunks:
+        all_embeddings = embed_texts(all_chunks)
         for offset, idx in enumerate(valid_indices):
-            embedding   = embeddings[offset]
-            text_norm   = keyword_texts_list[offset]
-            thr         = thresholds[idx]
-            unc         = unclassified_thresholds[idx]
+            start, count = row_chunk_spans[offset]
+            row_embeddings = all_embeddings[start : start + count]  # (count, dim)
+            text_norm = keyword_texts_list[offset]
+            thr = thresholds[idx]
+            unc = unclassified_thresholds[idx]
             if unc is None:
                 unc = min(UNCLASSIFIED_THRESHOLD_DEFAULT, thr)
             else:
                 unc = min(unc, thr)
 
-            scores, max_score = _score_one(
-                text_norm, embedding, centroids, keywords, category_config,
-                chapter_titles=chapter_titles,
-            )
-            matched, state, reason = _apply_bands(scores, max_score, thr, unc)
-
-            results[idx] = {
-                "categories":       matched,
-                "confidence_state": state,
-                "reason":           reason,
-                "scores":           scores,
-                "embedding":        embedding,
-            }
+            if count == 1:
+                # Fast path — same shape as today.
+                embedding = row_embeddings[0]
+                scores, max_score = _score_one(
+                    text_norm, embedding, centroids, keywords, category_config,
+                    chapter_titles=chapter_titles,
+                )
+                matched, state, reason = _apply_bands(scores, max_score, thr, unc)
+                results[idx] = {
+                    "categories":        matched,
+                    "confidence_state":  state,
+                    "reason":            reason,
+                    "scores":            scores,
+                    "embedding":         embedding,
+                    "chunks_processed":  1,
+                    "chunk_embeddings":  None,
+                }
+            else:
+                per_chunk_scores: list[dict] = []
+                for ci in range(count):
+                    s, _ = _score_one(
+                        text_norm, row_embeddings[ci],
+                        centroids, keywords, category_config,
+                        chapter_titles=chapter_titles,
+                    )
+                    per_chunk_scores.append(s)
+                scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
+                matched, state, reason = _apply_bands(scores, max_score, thr, unc)
+                results[idx] = {
+                    "categories":        matched,
+                    "confidence_state":  state,
+                    "reason":            reason,
+                    "scores":            scores,
+                    "embedding":         row_embeddings[winner_idx],
+                    "chunks_processed":  count,
+                    "chunk_embeddings":  row_embeddings,
+                }
 
     return results  # type: ignore[return-value]

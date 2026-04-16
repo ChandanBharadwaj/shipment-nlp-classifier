@@ -184,6 +184,10 @@ def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None 
             "classified_at":    datetime.now(tz=timezone.utc).isoformat(),
             "total_categories": len(centroids),
             "evaluated":        len(centroids),
+            # 1 for short inputs (fast path), N for inputs that exceeded the
+            # model's context window and were chunked. Surfaced for caller
+            # observability — long-tail risk catches show chunks_processed > 1.
+            "chunks_processed": result.get("chunks_processed", 1),
         },
     }
 
