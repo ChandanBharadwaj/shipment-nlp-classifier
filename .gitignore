@@ -42,3 +42,7 @@ test_data.csv
 
 # Docker volumes (if accidentally created locally)
 pgdata/
+
+# Large raw HS reference data (re-fetchable via scripts/fetch_public_data.py)
+data/hs/usitc_hts_2024.json
+data/hs/uk_chapters_raw/

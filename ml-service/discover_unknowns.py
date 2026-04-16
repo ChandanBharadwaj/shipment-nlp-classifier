@@ -100,10 +100,18 @@ def find_unknown_clusters(
         print("No clusters found — all unclassified shipments appear to be one-offs or noise.")
         return
 
-    # Centroid matrix for nearest-neighbour computation
+    # Centroid matrix for nearest-neighbour computation. Each category now
+    # holds a list of (hs_chapter, centroid_vec) tuples; collapse to a single
+    # mean-vector per category for the nearest-neighbour hint.
     if centroids:
-        cat_names   = list(centroids.keys())
-        cat_matrix  = np.stack([centroids[c] for c in cat_names])
+        cat_names = list(centroids.keys())
+        cat_vecs  = []
+        for c in cat_names:
+            stacked = np.stack([vec for _chap, vec in centroids[c]])
+            mean_v  = stacked.mean(axis=0)
+            norm    = np.linalg.norm(mean_v)
+            cat_vecs.append(mean_v / norm if norm > 0 else mean_v)
+        cat_matrix = np.stack(cat_vecs)
     else:
         cat_names  = []
         cat_matrix = None

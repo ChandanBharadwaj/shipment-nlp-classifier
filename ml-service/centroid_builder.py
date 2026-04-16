@@ -1,158 +1,214 @@
 """
-Offline centroid builder — multi-centroid k-means per category.
+Offline centroid builder — supervised per-chapter centroids.
 
 Reads labeled shipments from `shipment_labels` (split='train'), embeds their
-text using the configured sentence-transformer, runs k-means inside each
-category to produce 1–4 sub-centroids, and UPSERTs them into
-`category_centroids` keyed by (category_id, cluster_id).
+text using the configured sentence-transformer, and produces ONE centroid per
+(category, hs_chapter) pair — roughly 96 centroids across 20 categories.
 
-Why multi-centroid:
-    Heterogeneous categories (e.g. `machinery` spanning pumps, compressors,
-    tractors, CNC tools) are poorly represented by a single mean. Sub-clusters
-    give each sub-topic its own centroid and recall improves substantially —
-    at inference time the score for a category is the max cosine across its
-    sub-centroids.
+Why per-chapter instead of k-means:
+    The prior version ran k-means inside each category to split heterogeneous
+    ones (machinery spanning pumps / compressors / CNC tools). Clusters were
+    unsupervised and drifted into neighboring categories' topic space.
 
-Adaptive k:
-    k = clip(n_samples // 20, 1, 4)
-    So a 35-sample category uses k=1 (no benefit to splitting), a 65-sample
-    category uses k=3. Purely data-driven; no per-category tuning.
+    Now that every v2 training row carries its source `hs_chapter` (2-digit
+    HS code), we have labeled clusters for free. Chapter 84 (machinery) still
+    gets sub-clusters — one each for heading-groups like pumps (8413),
+    compressors (8414), CNC (8456-8466) — but each is supervised by the HS
+    hierarchy rather than k-means geometry.
+
+    Single-chapter categories (cosmetics=33, automotive=87, defense=93,
+    energy=27, minerals=26) naturally produce one centroid.
+
+Legacy rows:
+    Legacy rows (shipment_id matching the xx_### pattern) have hs_chapter=NULL.
+    They're assigned to the PRIMARY chapter of their coarse category — looked
+    up from `category_hs_chapters` where `is_primary = true`. This keeps
+    legacy samples contributing signal without a special code path at
+    inference time.
 
 Configuration:
-    EMBEDDING_MODEL env var — defaults to BAAI/bge-small-en-v1.5 (384-dim).
-    Must match what the API service uses at inference time.
+    EMBEDDING_MODEL env var — defaults to all-MiniLM-L6-v2 (384-dim). Must
+    match what the API service uses at inference time.
 
 Run:
     python centroid_builder.py
 
 Schedule:
-    Weekly via cron or task scheduler. After each run, call POST /reload on the
-    API service so the new centroids are loaded into memory without a restart.
+    After any data change: init_db.py → centroid_builder.py → fit_calibration.py.
+    Then POST /reload on the API so the new centroids load without a restart.
 """
 
 from __future__ import annotations
 
-import os
 import sys
+from collections import defaultdict
 
 import numpy as np
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import normalize
 
 from classifier import embed_texts, model  # reuses configured model
 from db import get_connection
 from preprocess import build_query_text
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BATCH_SIZE          = 512
-SAMPLE_PER_CATEGORY = 2000
+
+MIN_SAMPLES_PER_CHAPTER = 3   # below this we warn but still build a centroid
 
 
-def _choose_k(n_samples: int) -> int:
-    """Adaptive cluster count per category.
+# ── Queries ────────────────────────────────────────────────────────────────────
 
-    Multi-centroid helps heterogeneous categories (e.g. machinery covering
-    pumps, compressors, CNC tools) but hurts precision for homogeneous ones
-    by letting sub-centroids drift toward neighboring categories' topic
-    space. Require a higher per-cluster sample count (50 vs 20) so we only
-    split categories that are genuinely multi-modal.
-    """
-    if n_samples <= 0:
-        return 0
-    return int(max(1, min(4, n_samples // 50)))
-
-
-# Only train-split rows feed centroid building — validation/test held out for
-# tuning and final evaluation.
-SAMPLING_QUERY = """
+# Pull every train-split row for a category plus its hs_chapter.
+# Legacy rows (hs_chapter IS NULL) are re-labeled downstream to the category's
+# primary chapter so they feed into the main centroid.
+TRAIN_ROWS_QUERY = """
     SELECT sl.shipment_id,
            sl.cargo_text,
-           sl.commodity_text
+           sl.commodity_text,
+           sl.hs_chapter
     FROM   shipment_labels sl
     JOIN   classification_categories cc ON cc.name = sl.category_name
     WHERE  cc.is_active = true
       AND  sl.category_name = %s
       AND  sl.split = 'train'
-    ORDER  BY RANDOM()
-    LIMIT  %s
 """
+
+PRIMARY_CHAPTER_QUERY = """
+    SELECT cc.name, chc.hs_chapter
+    FROM   category_hs_chapters chc
+    JOIN   classification_categories cc ON cc.id = chc.category_id
+    WHERE  chc.is_primary = true
+"""
+
+ALL_CHAPTERS_QUERY = """
+    SELECT cc.name, chc.hs_chapter
+    FROM   category_hs_chapters chc
+    JOIN   classification_categories cc ON cc.id = chc.category_id
+    WHERE  cc.is_active = true
+    ORDER  BY cc.name, chc.hs_chapter
+"""
+
+
+def _load_primary_chapters(conn) -> dict[str, str]:
+    """{category_name: primary_hs_chapter} — one row per category."""
+    out: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute(PRIMARY_CHAPTER_QUERY)
+        for name, hs_chapter in cur.fetchall():
+            out[name] = hs_chapter
+    return out
+
+
+def _load_category_chapters(conn) -> dict[str, list[str]]:
+    """{category_name: [hs_chapter, ...]} — every edge in the taxonomy."""
+    out: dict[str, list[str]] = defaultdict(list)
+    with conn.cursor() as cur:
+        cur.execute(ALL_CHAPTERS_QUERY)
+        for name, hs_chapter in cur.fetchall():
+            out[name].append(hs_chapter)
+    return dict(out)
 
 
 def build_and_persist(conn) -> None:
     """
-    Build 1-4 sub-centroids per active category (k-means on the train split)
-    and UPSERT them into category_centroids.
+    Build one centroid per (category, hs_chapter) and UPSERT into
+    category_centroids. Wipe-and-rebuild semantics so stale chapters from a
+    prior taxonomy version don't linger.
     """
-    with conn.cursor() as cur:
-        cur.execute("SELECT name FROM classification_categories WHERE is_active = true ORDER BY name")
-        active_categories = [row[0] for row in cur.fetchall()]
+    primary_by_cat = _load_primary_chapters(conn)
+    chapters_by_cat = _load_category_chapters(conn)
 
-    if not active_categories:
-        print("No active categories found. Seed classification_categories first.")
+    if not chapters_by_cat:
+        print("No category_hs_chapters rows found. Run init_db.py first.")
         return
 
-    print(f"Building centroids for {len(active_categories)} active categories...")
-    print(f"Model: {model._first_module().auto_model.config.name_or_path if hasattr(model, '_first_module') else 'unknown'}")
+    print(f"Building supervised per-chapter centroids for {len(chapters_by_cat)} categories...")
+    model_name = (
+        model._first_module().auto_model.config.name_or_path
+        if hasattr(model, "_first_module") else "unknown"
+    )
+    print(f"Model: {model_name}")
 
-    # Collect all sub-centroid rows to write in one transaction.
-    # Format: [(category_name, cluster_id, centroid_vec, sample_count), ...]
-    to_upsert: list[tuple[str, int, list, int]] = []
+    # [(category_name, hs_chapter, centroid_vec, sample_count), ...]
+    to_upsert: list[tuple[str, str, list, int]] = []
 
-    for category in active_categories:
+    for category in sorted(chapters_by_cat.keys()):
         with conn.cursor() as cur:
-            cur.execute(SAMPLING_QUERY, (category, SAMPLE_PER_CATEGORY))
+            cur.execute(TRAIN_ROWS_QUERY, (category,))
             rows = cur.fetchall()
 
         if not rows:
-            print(f"  [{category}] WARNING: no labeled rows — skipping.")
+            print(f"  [{category}] WARNING: no train rows — skipping.")
             continue
 
-        texts = [build_query_text(cargo, commodity) for _sid, cargo, commodity in rows]
-        embeddings = embed_texts(texts)   # already L2-normalized, shape (n, dim)
+        # Bucket rows by chapter. Legacy rows (hs_chapter NULL) fall into the
+        # category's primary chapter.
+        primary = primary_by_cat.get(category)
+        if primary is None:
+            # Should not happen if seed_categories.sql marked one chapter primary.
+            primary = chapters_by_cat[category][0]
 
-        k = _choose_k(len(rows))
-        if k == 1:
-            centroid = embeddings.mean(axis=0)
-            centroid = centroid / np.linalg.norm(centroid)
-            to_upsert.append((category, 0, centroid.tolist(), len(rows)))
-            print(f"  [{category}] {len(rows)} samples → k=1")
-        else:
-            # n_init='auto' is the modern sklearn default and suppresses the
-            # deprecation warning on sklearn >= 1.4.
-            km = KMeans(n_clusters=k, n_init="auto", random_state=42)
-            labels = km.fit_predict(embeddings)
-            for cluster_id in range(k):
-                mask = labels == cluster_id
-                n_in_cluster = int(mask.sum())
-                if n_in_cluster == 0:
-                    continue
-                centroid = embeddings[mask].mean(axis=0)
-                centroid = centroid / np.linalg.norm(centroid)
-                to_upsert.append((category, cluster_id, centroid.tolist(), n_in_cluster))
-            sizes = [int((labels == c).sum()) for c in range(k)]
-            print(f"  [{category}] {len(rows)} samples → k={k} cluster_sizes={sizes}")
+        buckets: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for _sid, cargo, commodity, hs_chapter in rows:
+            bucket = hs_chapter if hs_chapter else primary
+            buckets[bucket].append((cargo, commodity))
+
+        # Batch-embed all rows for this category once (fewer model calls).
+        all_texts: list[str] = []
+        flat_buckets: list[str] = []
+        for chap in sorted(buckets):
+            for cargo, commodity in buckets[chap]:
+                all_texts.append(build_query_text(cargo, commodity))
+                flat_buckets.append(chap)
+
+        embeddings = embed_texts(all_texts)  # L2-normalized, shape (n, dim)
+
+        # One centroid per bucket: mean then re-normalize.
+        bucket_sizes: list[tuple[str, int]] = []
+        for chap in sorted(buckets):
+            idxs = [i for i, b in enumerate(flat_buckets) if b == chap]
+            sub = embeddings[idxs]
+            n_in = len(idxs)
+            centroid = sub.mean(axis=0)
+            norm = np.linalg.norm(centroid)
+            if norm > 0:
+                centroid = centroid / norm
+            to_upsert.append((category, chap, centroid.tolist(), n_in))
+            bucket_sizes.append((chap, n_in))
+
+        # Warn on any assigned chapter that ended up with no training data.
+        assigned = set(chapters_by_cat[category])
+        seen = set(buckets.keys())
+        missing = sorted(assigned - seen)
+
+        sizes_str = " ".join(f"{c}={n}" for c, n in bucket_sizes)
+        print(f"  [{category}] {len(rows)} samples → {len(buckets)} chapters  {sizes_str}")
+        if missing:
+            print(f"    MISSING (assigned, no train data): {missing}")
+
+        thin = [c for c, n in bucket_sizes if n < MIN_SAMPLES_PER_CHAPTER]
+        if thin:
+            print(f"    thin chapters (<{MIN_SAMPLES_PER_CHAPTER} samples): {thin}")
 
     if not to_upsert:
-        print("No centroids built. Check that shipment_labels has data.")
+        print("No centroids built. Check that shipment_labels has train data.")
         return
 
-    # Wipe-and-rebuild: centroids are a derived artifact. Delete all existing
-    # rows then insert the new set so a reduction in k for a category doesn't
-    # leave stale cluster_ids behind.
+    # Wipe-and-rebuild: centroids are derived. A chapter being reassigned or
+    # removed from a category must not leave stale rows behind.
     with conn.cursor() as cur:
         cur.execute("DELETE FROM category_centroids")
-        for category, cluster_id, centroid, sample_count in to_upsert:
+        for category, hs_chapter, centroid, sample_count in to_upsert:
             cur.execute("""
-                INSERT INTO category_centroids (category_id, cluster_id, centroid, sample_count, updated_at)
-                SELECT id, %s, %s, %s, now()
+                INSERT INTO category_centroids
+                    (category_id, hs_chapter, cluster_id, centroid, sample_count, updated_at)
+                SELECT id, %s, 0, %s, %s, now()
                 FROM   classification_categories
                 WHERE  name = %s
-            """, (cluster_id, centroid, sample_count, category))
+            """, (hs_chapter, centroid, sample_count, category))
     conn.commit()
 
     n_categories = len({row[0] for row in to_upsert})
-    n_centroids  = len(to_upsert)
-    print(f"\nDone. Built {n_centroids} sub-centroids across {n_categories} categories.")
+    n_centroids = len(to_upsert)
+    print(f"\nDone. Built {n_centroids} centroids across {n_categories} categories.")
     print("Next steps:")
     print("  1. Fit calibration:  python fit_calibration.py")
     print("  2. Reload API:       curl -X POST http://localhost:8001/reload")

@@ -72,28 +72,43 @@ except Exception as exc:  # pragma: no cover - defensive
 
 # ── DB loaders ─────────────────────────────────────────────────────────────────
 
-def load_centroids(conn) -> dict[str, list[np.ndarray]]:
+def load_centroids(conn) -> dict[str, list[tuple[str, np.ndarray]]]:
     """
-    Load L2-normalized centroid vectors for all active categories.
+    Load L2-normalized centroid vectors for all active categories, tagged with
+    their HS 2-digit chapter.
 
     Returns:
-        {category_name: [np.ndarray(384,), ...]}
-        One list entry per sub-centroid. Single-centroid categories have a
-        list of length 1 — callers should never assume length >= 1 though;
-        categories with no centroids (seeded but not yet built) are omitted.
+        {category_name: [(hs_chapter, np.ndarray(dim,)), ...]}
+        One list entry per child chapter. Categories with no centroids
+        (seeded but not yet built) are omitted. The ``hs_chapter`` tag drives
+        the ``best_chapter`` field in scoring output.
+
+    Legacy rows written by older centroid_builder (hs_chapter NULL) are still
+    loaded — their tag is the empty string, so they behave as a generic
+    fallback centroid for the category.
     """
-    result: dict[str, list[np.ndarray]] = defaultdict(list)
+    result: dict[str, list[tuple[str, np.ndarray]]] = defaultdict(list)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT cc.name, cen.cluster_id, cen.centroid
+            SELECT cc.name, COALESCE(cen.hs_chapter, ''), cen.centroid
             FROM   category_centroids cen
             JOIN   classification_categories cc ON cc.id = cen.category_id
             WHERE  cc.is_active = true
-            ORDER  BY cc.name, cen.cluster_id
+            ORDER  BY cc.name, cen.hs_chapter
         """)
-        for name, _cluster_id, centroid in cur.fetchall():
-            result[name].append(np.array(centroid))
+        for name, hs_chapter, centroid in cur.fetchall():
+            result[name].append((hs_chapter, np.array(centroid)))
     return dict(result)
+
+
+def load_chapter_titles(conn) -> dict[str, str]:
+    """Return {hs_chapter: chapter_title} for all 96 active HS chapters."""
+    titles: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT hs_chapter, chapter_title FROM category_hs_chapters")
+        for hs_chapter, title in cur.fetchall():
+            titles[hs_chapter] = title
+    return titles
 
 
 def load_keywords(conn) -> dict[str, list[tuple[str, float]]]:
@@ -247,24 +262,34 @@ def embed_texts(texts: list[str]) -> np.ndarray:
 def _score_one(
     text_norm: str,
     embedding: np.ndarray,
-    centroids: dict[str, list[np.ndarray]],
+    centroids: dict[str, list[tuple[str, np.ndarray]]],
     keywords: dict[str, list[tuple[str, float]]],
     category_config: dict[str, dict],
+    chapter_titles: dict[str, str] | None = None,
 ) -> tuple[dict, float]:
     """
     Compute per-category scores for one already-embedded, already-normalized text.
     Returns (scores_dict, max_final_score).
+
+    `centroids[category]` is a list of (hs_chapter, centroid_vec) tuples — one
+    entry per HS chapter assigned to that category. The winning chapter (by
+    max cosine) is surfaced in ``scores[category]["best_chapter"]``.
     """
+    if chapter_titles is None:
+        chapter_titles = {}
+
     scores: dict[str, dict] = {}
     max_score = -1.0
 
-    for category, sub_centroids in centroids.items():
-        # Max cosine across sub-centroids — the multi-centroid fix for
-        # heterogeneous categories (machinery, electronics…).
-        stacked = np.stack(sub_centroids)                 # (k, dim)
-        sims    = stacked @ embedding                     # (k,)
-        sem     = round(float(sims.max()), 4)
-        best_k  = int(sims.argmax())
+    for category, children in centroids.items():
+        # Max cosine across child-chapter centroids. Supervised per-chapter
+        # clusters replace the old unsupervised k-means split.
+        chapters = [c[0] for c in children]
+        stacked  = np.stack([c[1] for c in children])     # (k, dim)
+        sims     = stacked @ embedding                    # (k,)
+        sem      = round(float(sims.max()), 4)
+        best_k   = int(sims.argmax())
+        best_chapter = chapters[best_k]
 
         kw_s, hits = keyword_score(text_norm, keywords.get(category, []))
 
@@ -286,13 +311,15 @@ def _score_one(
             probability = final
 
         scores[category] = {
-            "semantic_score": sem,
-            "keyword_score":  kw_s,
-            "final_score":    final,
-            "probability":    probability,
-            "matched":        False,
-            "keywords_hit":   hits,
-            "best_cluster":   best_k,
+            "semantic_score":     sem,
+            "keyword_score":      kw_s,
+            "final_score":        final,
+            "probability":        probability,
+            "matched":            False,
+            "keywords_hit":       hits,
+            "best_chapter":       best_chapter,
+            "best_chapter_title": chapter_titles.get(best_chapter, ""),
+            "best_cluster":       best_k,  # retained for one release; prefer best_chapter
         }
         if final > max_score:
             max_score = final
@@ -335,11 +362,12 @@ def _apply_bands(
 def predict(
     cargo_description: str,
     commodity_description: str,
-    centroids: dict[str, list[np.ndarray]],
+    centroids: dict[str, list[tuple[str, np.ndarray]]],
     keywords: dict[str, list[tuple[str, float]]],
     category_config: dict[str, dict] | None = None,
     threshold: float = 0.45,
     unclassified_threshold: float | None = None,
+    chapter_titles: dict[str, str] | None = None,
 ) -> dict:
     """
     Classify a single shipment.
@@ -373,7 +401,8 @@ def predict(
     embedding = embed_texts([text_for_embedding])[0]
 
     scores, max_score = _score_one(
-        text_for_keywords, embedding, centroids, keywords, category_config
+        text_for_keywords, embedding, centroids, keywords, category_config,
+        chapter_titles=chapter_titles,
     )
     matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold)
 
@@ -388,11 +417,12 @@ def predict(
 
 def predict_batch(
     inputs: Iterable[tuple[str, str]],
-    centroids: dict[str, list[np.ndarray]],
+    centroids: dict[str, list[tuple[str, np.ndarray]]],
     keywords: dict[str, list[tuple[str, float]]],
     category_config: dict[str, dict] | None = None,
     thresholds: list[float] | float = 0.45,
     unclassified_thresholds: list[float | None] | float | None = None,
+    chapter_titles: dict[str, str] | None = None,
 ) -> list[dict]:
     """
     Batched inference — single model.encode() call for all valid rows.
@@ -453,7 +483,8 @@ def predict_batch(
                 unc = min(unc, thr)
 
             scores, max_score = _score_one(
-                text_norm, embedding, centroids, keywords, category_config
+                text_norm, embedding, centroids, keywords, category_config,
+                chapter_titles=chapter_titles,
             )
             matched, state, reason = _apply_bands(scores, max_score, thr, unc)
 

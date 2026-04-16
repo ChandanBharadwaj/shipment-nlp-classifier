@@ -38,6 +38,7 @@ from classifier import (
     UNCLASSIFIED_THRESHOLD_DEFAULT,
     load_category_config,
     load_centroids,
+    load_chapter_titles,
     load_keywords,
     predict,
     predict_batch,
@@ -56,19 +57,21 @@ app = FastAPI(
 centroids:       dict = {}
 keywords:        dict = {}
 category_config: dict = {}
+chapter_titles:  dict = {}
 
 
 @app.on_event("startup")
 def startup() -> None:
-    global centroids, keywords, category_config
+    global centroids, keywords, category_config, chapter_titles
     with pooled_connection() as conn:
         centroids       = load_centroids(conn)
         keywords        = load_keywords(conn)
         category_config = load_category_config(conn)
+        chapter_titles  = load_chapter_titles(conn)
     print(
         f"Loaded {len(centroids)} category centroids "
-        f"(sub-centroids total: {sum(len(v) for v in centroids.values())}), "
-        f"model={MODEL_NAME}"
+        f"(chapter centroids total: {sum(len(v) for v in centroids.values())}), "
+        f"{len(chapter_titles)} HS chapters, model={MODEL_NAME}"
     )
 
 
@@ -180,7 +183,8 @@ def health() -> dict:
     return {
         "status":             "ok",
         "categories_loaded":  len(centroids),
-        "sub_centroids":      sum(len(v) for v in centroids.values()),
+        "chapter_centroids":  sum(len(v) for v in centroids.values()),
+        "hs_chapters":        len(chapter_titles),
         "model_version":      MODEL_NAME,
         "calibrated":         any(
             c.get("platt_a") is not None for c in category_config.values()
@@ -198,6 +202,7 @@ def classify(req: ClassifyRequest) -> dict:
         category_config,
         threshold=req.threshold,
         unclassified_threshold=req.unclassified_threshold,
+        chapter_titles=chapter_titles,
     )
 
     if req.persist:
@@ -237,6 +242,7 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
         category_config,
         thresholds=thrs,
         unclassified_thresholds=unc_thrs,
+        chapter_titles=chapter_titles,
     )
 
     # Persist (single transaction for the whole batch).
@@ -261,16 +267,18 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
 
 @app.post("/reload")
 def reload() -> dict:
-    """Reload centroids, keywords, and per-category config from DB."""
-    global centroids, keywords, category_config
+    """Reload centroids, keywords, chapter titles, and per-category config from DB."""
+    global centroids, keywords, category_config, chapter_titles
     with pooled_connection() as conn:
         centroids       = load_centroids(conn)
         keywords        = load_keywords(conn)
         category_config = load_category_config(conn)
+        chapter_titles  = load_chapter_titles(conn)
     return {
         "status":             "reloaded",
         "categories_loaded":  len(centroids),
-        "sub_centroids":      sum(len(v) for v in centroids.values()),
+        "chapter_centroids":  sum(len(v) for v in centroids.values()),
+        "hs_chapters":        len(chapter_titles),
         "calibrated":         any(
             c.get("platt_a") is not None for c in category_config.values()
         ),

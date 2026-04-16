@@ -37,11 +37,13 @@ ROOT = Path(__file__).parent
 SCHEMA: Path = ROOT / "schema.sql"
 
 SEEDS: list[Path] = [
-    ROOT / "seed" / "seed_categories.sql",
-    ROOT / "seed" / "seed_keywords.sql",
-    ROOT / "seed" / "seed_shipment_labels.sql",
-    ROOT / "seed" / "seed_extra_labels.sql",   # extra variety rows to improve centroid quality
-    ROOT / "seed" / "seed_splits.sql",          # assigns train/validation/test splits
+    ROOT / "seed" / "seed_categories.sql",       # 20 categories + 96 HS chapter edges
+    ROOT / "seed" / "seed_keywords.sql",         # legacy hand-curated keywords
+    ROOT / "seed" / "seed_keywords_v2.sql",      # TF-IDF + hand merge (generated)
+    ROOT / "seed" / "seed_shipment_labels.sql",  # legacy 1000 labeled rows
+    ROOT / "seed" / "seed_splits.sql",           # splits legacy rows only
+    ROOT / "seed" / "seed_shipment_labels_v2.sql",  # generated ~15k rows w/ hs_chapter + split
+    ROOT / "seed" / "seed_confusables.sql",      # hand-curated confusables (train-only)
 ]
 
 
@@ -129,8 +131,9 @@ def run(url: str, include_seed: bool = True, dry_run: bool = False) -> None:
     print("\n── Summary ──────────────────────────────────────────────────")
     counts = {
         "classification_categories": "categories",
+        "category_hs_chapters":      "HS-chapter → category edges (target: 96)",
         "category_keywords":         "keywords",
-        "shipment_labels":           "labeled rows (PoC — base 1000 + extras; split into train/validation/test)",
+        "shipment_labels":           "labeled rows (legacy + v2-generated)",
     }
     for table, label in counts.items():
         try:
