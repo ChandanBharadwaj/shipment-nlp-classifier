@@ -30,8 +30,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
+import os
+
 import psycopg2
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from classifier import (
@@ -98,6 +101,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Static single-page UI for CSV-upload testing. Stateless — the page never
+# persists results. Mounted at /ui so /classify, /health etc. stay unchanged.
+# `html=True` makes /ui/ serve index.html automatically.
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+
 
 # ── Request / Response models ──────────────────────────────────────────────────
 
@@ -161,10 +171,38 @@ def _persist_one(cur, shipment_id: str, result: dict, threshold: float) -> None:
 
 
 def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None = None) -> dict:
-    """Build the standard API response envelope."""
+    """Build the standard API response envelope.
+
+    End-user lens for ``scores``:
+      - ``classified``     → show only the categories that fired.
+      - ``low_confidence`` → show the single top candidate we tentatively
+                              assigned (matches what ``categories[]`` holds).
+      - ``unclassified``   → show the top 3 candidates by ``final_score``
+                              so the user sees what we considered and rejected,
+                              not an empty dict.
+
+    The full per-category breakdown (all 20 rows) is always written to the DB
+    via ``_persist_one`` for offline audit and threshold tuning. The trim is
+    purely an API-boundary concern.
+    """
+    all_scores = result.get("scores") or {}
+    matched    = result.get("categories") or []
+
+    if matched:
+        # Show only the categories the model committed to.
+        visible = [(c, all_scores[c]) for c in matched if c in all_scores]
+    else:
+        # Unclassified — surface the top 3 by final_score so the response
+        # explains *why* nothing fired (the runners-up didn't clear the bar).
+        visible = sorted(
+            all_scores.items(),
+            key=lambda kv: kv[1].get("final_score", 0.0),
+            reverse=True,
+        )[:3]
+
     scores_out = {
         cat: {k: v for k, v in s.items() if k != "embedding"}
-        for cat, s in (result.get("scores") or {}).items()
+        for cat, s in visible
     }
 
     response = {
@@ -184,6 +222,10 @@ def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None 
             "classified_at":    datetime.now(tz=timezone.utc).isoformat(),
             "total_categories": len(centroids),
             "evaluated":        len(centroids),
+            # How many of the 20 categories the response actually surfaces.
+            # Equals len(matched) when classified/low_confidence; <= 3 when
+            # unclassified (top runners-up). Useful for caller dashboards.
+            "categories_returned": len(scores_out),
             # 1 for short inputs (fast path), N for inputs that exceeded the
             # model's context window and were chunked. Surfaced for caller
             # observability — long-tail risk catches show chunks_processed > 1.
@@ -218,6 +260,21 @@ def health() -> dict:
             c.get("platt_a") is not None for c in category_config.values()
         ),
         "risk_vectors":       stats.get("total_vectors", 0),
+    }
+
+
+@app.get("/risk-levels")
+def risk_levels() -> dict:
+    """Return {category: risk_level} for the UI's risk-tag rendering.
+
+    Reads from the in-memory risk_vectors loaded at startup so the response
+    auto-refreshes after POST /reload. Categories without an explicit
+    risk_level fall back to "low".
+    """
+    cats = risk_vectors.get("categories", {}) or {}
+    return {
+        cat: (conf.get("risk_level") or "low")
+        for cat, conf in cats.items()
     }
 
 

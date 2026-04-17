@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shipment Classifier — CSV tester</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">
+      <h1>Shipment Classifier</h1>
+      <p class="subtitle">
+        Drop a CSV. We classify in batch and show only the labels that fired.
+        Stateless — reload the page and everything clears.
+      </p>
+    </div>
+    <div class="actions">
+      <a href="/docs" target="_blank" rel="noopener" class="link-btn">API docs</a>
+      <a href="sample.csv" download class="link-btn">Download sample CSV</a>
+    </div>
+  </header>
+
+  <main>
+    <section id="dropzone" class="dropzone">
+      <input type="file" id="file" accept=".csv,text/csv" hidden />
+      <div class="dz-inner">
+        <p class="dz-title">Drop a CSV here</p>
+        <p class="dz-sub">or <button type="button" id="pickBtn" class="link-btn inline">choose a file</button></p>
+        <p class="dz-hint">
+          Required columns: <code>shipment_id</code>, <code>cargo_description</code>, <code>commodity_description</code>.
+          Optional: <code>threshold</code>, <code>unclassified_threshold</code>.
+          Max 500 rows per upload.
+        </p>
+      </div>
+    </section>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <section id="status" class="status hidden">
+      <span class="spinner"></span>
+      <span id="statusText">Classifying…</span>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="results-header">
+        <h2>Results</h2>
+        <div class="legend">
+          <span class="badge risky">RISKY</span>
+          <span class="badge clean">clean</span>
+          <span class="tag tag-high">HIGH RISK</span>
+          <span class="tag tag-med">MED RISK</span>
+          <span class="tag tag-low">LOW RISK</span>
+        </div>
+      </div>
+      <div id="summary" class="summary"></div>
+      <div class="table-wrap">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>Shipment ID</th>
+              <th>Cargo</th>
+              <th>Commodity</th>
+              <th>Labels</th>
+              <th>Confidence</th>
+              <th>Compliance</th>
+              <th>Chunks</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      No client storage, no DB writes. Every request to <code>/classify/batch</code> sets
+      <code>persist: false</code>.
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

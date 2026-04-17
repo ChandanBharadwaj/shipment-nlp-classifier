@@ -234,6 +234,45 @@ Look for:
 
 ---
 
+## 10b. Try the bulk-upload UI
+
+Open <http://localhost:8000/ui> in a browser. Drag
+`ml-service/static/sample.csv` onto the dropzone (or click to pick it).
+
+Expected:
+
+- 7 rows render in the results table within ~2-4 seconds.
+- **demo-001 / demo-002 / demo-003 / demo-004** classify cleanly into
+  `toys`, `machinery`, `perishables`, `textiles` respectively — one chip
+  per row, each in its own distinct colour, each with its risk-tier text
+  tag (`HIGH RISK` / `MED RISK` / `LOW RISK`). Compliance shows a green
+  `clean` badge.
+- **demo-005 (depleted uranium)** comes back as `unclassified` (none of
+  the 20 trade categories own "nuclear material") but compliance still
+  flags it RISKY via the global blocked-phrase semantic match. The row
+  gets a red **RISKY** badge plus a 4 px red left border, and the reason
+  cell quotes the IAEA control match.
+- **demo-006 (MANPADS)** also comes back `unclassified` (top-1 didn't
+  fire) but compliance flags it RISKY via the category-scoped MANPADS
+  semantic match (ITAR Category IV). Same red badge + border treatment.
+- **demo-007 (gibberish)** is `unclassified` *and* RISKY — the cascade
+  conservatively routes any unclassified input for human review. The
+  chip cell shows a grey `unclassified` chip plus up to three small grey
+  `considered: X (0.31)` runner-up chips so you see what the model
+  weighed and rejected.
+- Reload the browser tab → the table and file input both clear. No state
+  survives. DevTools → Application → Storage shows nothing set by `/ui`.
+
+The UI calls `/classify/batch` exactly once with `persist: false` on every
+row, so nothing is written to the DB. Verify with:
+
+```sql
+SELECT count(*) FROM shipment_classifications WHERE shipment_id LIKE 'demo-%';
+-- 0
+```
+
+---
+
 ## 11. Run the test suites
 
 ```bash

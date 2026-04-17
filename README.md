@@ -273,11 +273,32 @@ Endpoints:
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness + load stats (categories, HS chapters, risk vectors, calibration) |
+| `GET` | `/risk-levels` | `{category: risk_level}` map for UI rendering — auto-refreshes on `/reload` |
 | `POST` | `/classify` | Single shipment → category + compliance decision |
 | `POST` | `/classify/batch` | Up to 500 shipments per call, single batched embedding |
 | `POST` | `/reload` | Reload centroids, keywords, calibration, and risk vectors from disk + DB |
 
 Auto-generated OpenAPI docs at <http://localhost:8000/docs> when the service is running.
+
+### Bulk-test UI
+
+A stateless single-page UI ships at <http://localhost:8000/ui>. Drag in a CSV
+with columns `shipment_id,cargo_description,commodity_description` (plus
+optional `threshold` / `unclassified_threshold`) and you'll get a colour-coded
+results table — one chip per matched category, a `RISKY` / `clean` compliance
+badge per row, and the chunk count for any input that was long enough to
+trigger chunked embedding.
+
+The UI never persists results: every batch call sets `persist: false`, and the
+page sets no cookies, no `localStorage`, no `sessionStorage`. Reload to start
+over. A demo CSV (`ml-service/static/sample.csv`) covers all three confidence
+states plus the depleted-uranium risky path so you can verify the install in
+one drag-and-drop.
+
+> **Response shape note:** `result.scores` contains only the categories that
+> fired (or the top-3 runners-up when `confidence_state == "unclassified"`,
+> so the response explains *why* nothing matched). The full 20-row breakdown
+> is still written to `shipment_classifications.scores` for offline audit.
 
 ---
 
