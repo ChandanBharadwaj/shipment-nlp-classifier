@@ -279,13 +279,15 @@ SELECT count(*) FROM shipment_classifications WHERE shipment_id LIKE 'demo-%';
 # Inside ml-service/ with venv active
 python test_compliance.py
 python test_chunking.py
+python -m pytest tests/ -v
 ```
 
 Expected:
 - `test_compliance.py` → **`24 passed, 0 failed out of 24`** — every cascade path (global block, category block/review, semantic paraphrases, high-risk routing, low-confidence routing, allow path, multi-label edges).
 - `test_chunking.py` → **`26 passed, 0 failed out of 26`** — `chunk_text` unit behavior (fast path, sentence pack, word pack, hard cut, DoS cap), aggregation, the silent-truncation **baseline** (test 9 documents the bug), and the buried-tail-risk **catch** via per-chunk compliance (test 10 proves the fix).
+- `pytest tests/` → **`36 passed`** — pollution-defense unit suite: top-margin rule branches + metrics counters (`tests/test_margin_rule.py`), sigmoid-wrapped CE reranker short-circuit & drop behavior (`tests/test_reranker.py`), prune helpers (`tests/test_prune.py`), metrics snapshot semantics (`tests/test_metrics.py`).
 
-Both load the embedding model but need no DB.
+All three load the embedding model but need no DB.
 
 ---
 
@@ -303,10 +305,40 @@ Both load the embedding model but need no DB.
 |---|---|
 | Reload risk profile after editing `risk_profile.json` | `curl -X POST http://localhost:8000/reload` |
 | Reload centroids after re-running `centroid_builder.py` | `curl -X POST http://localhost:8000/reload` |
+| Check runtime counters (margin suppressions, reranker fires) | `curl http://localhost:8000/metrics` |
+| Grid-sweep `threshold × margin_delta` for F1 | `python calibrate.py` |
+| Preview single-token keyword prune (dry run) | `python -m diagnostics.prune_keywords` |
+| Commit prune + auto-reload the service | `python -m diagnostics.prune_keywords --apply && curl -X POST http://localhost:8000/reload` |
 | Stop the database (keep data) | `docker compose down` |
 | **Wipe the database** (delete all data) | `docker compose down -v` |
 | Tail API logs | The terminal running `uvicorn` |
 | Tail DB logs | `docker compose logs -f db` |
+
+---
+
+## Tunable knobs (env vars, optional)
+
+All tunables live in [`ml-service/config.py`](ml-service/config.py) with env-var overrides — set them in `.env` or the shell before starting `uvicorn`. Restart the service to pick up changes.
+
+| Env var | Default | What it controls |
+|---|---|---|
+| `CLASSIFY_THRESHOLD` | `0.45` | Score at or above → `classified` band |
+| `UNCLASSIFIED_THRESHOLD` | `0.35` | Floor below which → `unclassified` |
+| `MARGIN_DELTA` | `0.06` | Secondary labels must be within δ of the top score (Phase 1) |
+| `KEYWORD_SATURATION_ALPHA` | `0.5` | Curve steepness for `1 − exp(−α · Σweights)` keyword score |
+| `MIN_KEYWORD_COSINE` | `0.30` | Prune cutoff for single-token keywords (Phase 2, offline) |
+| `RERANKER_ENABLED` | `false` | Turn the cross-encoder reranker on (Phase 3) |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Override the CE model |
+| `CROSS_ENCODER_MARGIN` | `0.15` | CE margin in sigmoid-squashed (0, 1) space |
+
+To enable the reranker end-to-end:
+```bash
+# Windows PowerShell
+$env:RERANKER_ENABLED="true"; uvicorn main:app --port 8000
+# Bash
+RERANKER_ENABLED=true uvicorn main:app --port 8000
+```
+Startup logs print `Cross-encoder reranker enabled: …`. `GET /health` shows `reranker_enabled: true`.
 
 ---
 

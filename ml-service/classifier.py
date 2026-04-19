@@ -38,13 +38,39 @@ from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize as sk_normalize
 
 from chunking import chunk_text
-from preprocess import build_query_text, normalize as preprocess_normalize
+from config import (
+    CROSS_ENCODER_MARGIN_DEFAULT,
+    KEYWORD_SATURATION_ALPHA,
+    MARGIN_DELTA_DEFAULT,
+    UNCLASSIFIED_THRESHOLD_DEFAULT,
+)
+from preprocess import build_query_text, extract_signals, normalize as preprocess_normalize
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-MODEL_NAME                    = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-UNCLASSIFIED_THRESHOLD_DEFAULT = 0.35
-KEYWORD_SATURATION_ALPHA       = 0.5   # 1 hit@1.0 → 0.39, 2 hits → 0.63, 3 hits → 0.78
+MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+# ── Runtime metrics counters (Phase 1/3 observability) ────────────────────────
+# Simple in-process counters, read by main.py's /metrics endpoint. Single-worker
+# by design — if you scale to multiple uvicorn workers you'll get per-worker
+# counts. That's fine for local tuning; switch to statsd/prom if ops cares.
+_metrics: dict[str, int] = {
+    "predictions_total":        0,
+    "margin_suppressions_total": 0,  # labels dropped by the top-margin rule
+    "rerank_fires_total":       0,   # rows where the reranker actually ran
+    "rerank_drops_total":       0,   # labels dropped by the reranker
+}
+
+
+def get_metrics() -> dict[str, int]:
+    """Snapshot of in-process counters for /metrics."""
+    return dict(_metrics)
+
+
+def reset_metrics() -> None:
+    """Zero the counters — called by tests and, optionally, on /reload."""
+    for k in _metrics:
+        _metrics[k] = 0
 
 # Generic tokens — if the normalized text consists entirely of these, it's
 # flagged as "generic" (insufficient information to classify).
@@ -67,6 +93,72 @@ except Exception as exc:  # pragma: no cover - defensive
     print(f"WARNING: could not load EMBEDDING_MODEL={MODEL_NAME} ({exc}); falling back to all-MiniLM-L6-v2")
     MODEL_NAME = "all-MiniLM-L6-v2"
     model      = SentenceTransformer(MODEL_NAME)
+
+# Cross-encoder reranker (Phase 3, optional). None = disabled. Callers opt in
+# by invoking `load_cross_encoder()` once at startup (typically gated behind
+# the RERANKER_ENABLED env var in main.py).
+_cross_encoder = None
+
+
+def load_cross_encoder(model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    """Load (or reload) the cross-encoder reranker. Returns the handle."""
+    global _cross_encoder
+    from sentence_transformers import CrossEncoder  # lazy import — skip when disabled
+    _cross_encoder = CrossEncoder(model_name)
+    return _cross_encoder
+
+
+def _sigmoid(x: float) -> float:
+    """Stable sigmoid over raw CE logits. CE scores are unbounded, so we
+    squash to (0, 1) before applying the margin — same threshold then means
+    the same thing across different cross-encoder models."""
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def _rerank_candidates(
+    text: str,
+    matched: list[str],
+    scores: dict,
+    category_descriptions: dict[str, str] | None,
+    margin: float = CROSS_ENCODER_MARGIN_DEFAULT,
+) -> list[str]:
+    """Rerank `matched` via the cross-encoder; drop candidates more than
+    `margin` below the top, measured in sigmoid-wrapped probability space.
+
+    Short-circuits (returns `matched` unchanged) when:
+      - the cross-encoder isn't loaded (disabled), OR
+      - fewer than 2 candidates survived Phase 1 (nothing to rerank), OR
+      - no category_descriptions were provided.
+
+    Side effect: annotates each scored candidate with both the raw logit
+    (``cross_encoder_score``) and the squashed probability (``cross_encoder_prob``)
+    so the audit trail shows what the CE thought AND the comparable number
+    the margin rule actually used.
+    """
+    if _cross_encoder is None or len(matched) < 2 or not category_descriptions:
+        return matched
+    pairs: list[tuple[str, str]] = []
+    cats: list[str] = []
+    for c in matched:
+        desc = category_descriptions.get(c)
+        if desc:
+            pairs.append((text, desc))
+            cats.append(c)
+    if len(cats) < 2:
+        return matched
+    ce_logits = _cross_encoder.predict(pairs)
+    ce_probs = [_sigmoid(float(s)) for s in ce_logits]
+    for cat, logit, prob in zip(cats, ce_logits, ce_probs):
+        scores[cat]["cross_encoder_score"] = round(float(logit), 4)
+        scores[cat]["cross_encoder_prob"]  = round(prob, 4)
+    ranked = sorted(zip(cats, ce_probs), key=lambda t: t[1], reverse=True)
+    top_prob = ranked[0][1]
+    kept = {c for c, p in ranked if p >= top_prob - margin}
+    return [c for c in matched if c in kept]
 
 
 # ── DB loaders ─────────────────────────────────────────────────────────────────
@@ -108,6 +200,60 @@ def load_chapter_titles(conn) -> dict[str, str]:
         for hs_chapter, title in cur.fetchall():
             titles[hs_chapter] = title
     return titles
+
+
+def load_chapter_to_category(conn) -> dict[str, str]:
+    """Return {hs_chapter: category_name} for the HS-code tiebreaker.
+
+    Schema guarantees ``UNIQUE(hs_chapter)`` — each chapter maps to exactly one
+    active category — so no ambiguity here.
+    """
+    mapping: dict[str, str] = {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT chc.hs_chapter, cc.name
+            FROM   category_hs_chapters chc
+            JOIN   classification_categories cc ON cc.id = chc.category_id
+            WHERE  cc.is_active = true
+        """)
+        for hs_chapter, name in cur.fetchall():
+            mapping[hs_chapter] = name
+    return mapping
+
+
+def _hs_implied_categories(
+    hs_codes: list[str],
+    chapter_to_category: dict[str, str] | None,
+) -> list[str]:
+    """Map extracted HS codes to the set of implied categories via their
+    2-digit chapter prefix. Returns a deduplicated list preserving first-seen
+    order for stable audit output.
+    """
+    if not hs_codes or not chapter_to_category:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for code in hs_codes:
+        if len(code) < 2:
+            continue
+        chapter = code[:2]
+        cat = chapter_to_category.get(chapter)
+        if cat and cat not in seen:
+            seen.add(cat)
+            out.append(cat)
+    return out
+
+
+def _hs_text_mismatch(hs_implied: list[str], matched_categories: list[str]) -> bool:
+    """True when HS chapter implies a category the text classifier did not commit to.
+
+    Returns False when either side has no opinion (no HS code extracted, or text
+    classifier returned nothing) — a missing opinion isn't a disagreement. Only
+    returns True when both sides have concrete categories AND they don't overlap.
+    """
+    if not hs_implied or not matched_categories:
+        return False
+    return not (set(hs_implied) & set(matched_categories))
 
 
 def load_keywords(conn) -> dict[str, list[tuple[str, float]]]:
@@ -331,6 +477,7 @@ def _apply_bands(
     max_score: float,
     threshold: float,
     unclassified_threshold: float,
+    margin_delta: float = MARGIN_DELTA_DEFAULT,
 ) -> tuple[list[str], str, str | None]:
     """
     Apply the confidence bands to already-computed per-category scores.
@@ -341,6 +488,11 @@ def _apply_bands(
     severe class imbalance (8:152 per category in the training set) Platt
     sigmoids compress everything below ~0.1, which would make any reasonable
     threshold exclude all positives.
+
+    Top-margin rule: in the `classified` band, secondary labels must be within
+    `margin_delta` of the top score to fire. Prevents weak tail labels from
+    leaking through on multi-label output when single-token keyword hits nudge
+    an unrelated category just above `threshold`.
     """
     if max_score < unclassified_threshold:
         return [], "unclassified", "low_similarity"
@@ -350,10 +502,39 @@ def _apply_bands(
         scores[top_cat]["matched"] = True
         return [top_cat], "low_confidence", None
 
-    matched = [c for c, s in scores.items() if s["final_score"] >= threshold]
+    cutoff = max_score - margin_delta
+    above_threshold = [c for c, s in scores.items() if s["final_score"] >= threshold]
+    matched = [c for c in above_threshold if scores[c]["final_score"] >= cutoff]
     for c in matched:
         scores[c]["matched"] = True
+    _metrics["margin_suppressions_total"] += len(above_threshold) - len(matched)
     return matched, "classified", None
+
+
+def _maybe_rerank(
+    text: str,
+    matched: list[str],
+    state: str,
+    scores: dict,
+    category_descriptions: dict[str, str] | None,
+) -> tuple[list[str], bool]:
+    """Call the cross-encoder reranker when appropriate; update `scores[cat]["matched"]`
+    flags for any categories the reranker drops.
+
+    Returns ``(matched_list, reranked_flag)``. `reranked_flag` is True iff the
+    reranker actually ran (regardless of whether it shortened the list).
+    """
+    if state != "classified" or len(matched) < 2 or _cross_encoder is None:
+        return matched, False
+    new_matched = _rerank_candidates(text, matched, scores, category_descriptions)
+    _metrics["rerank_fires_total"] += 1
+    if len(new_matched) != len(matched):
+        _metrics["rerank_drops_total"] += len(matched) - len(new_matched)
+        kept = set(new_matched)
+        for c in matched:
+            if c not in kept:
+                scores[c]["matched"] = False
+    return new_matched, True
 
 
 # ── Chunk aggregation ─────────────────────────────────────────────────────────
@@ -429,13 +610,16 @@ def predict(
     threshold: float = 0.45,
     unclassified_threshold: float | None = None,
     chapter_titles: dict[str, str] | None = None,
+    chapter_to_category: dict[str, str] | None = None,
+    category_descriptions: dict[str, str] | None = None,
+    margin_delta: float = MARGIN_DELTA_DEFAULT,
 ) -> dict:
     """
     Classify a single shipment.
 
-    Backwards-compatible with the old signature (category_config optional).
-    Callers that haven't been updated yet can still call:
-        predict(cargo, commodity, centroids, keywords, threshold=0.45)
+    Backwards-compatible with the old signature (category_config,
+    chapter_to_category optional). Callers that haven't been updated yet can
+    still call: ``predict(cargo, commodity, centroids, keywords, threshold=0.45)``.
     """
     if category_config is None:
         category_config = {}
@@ -445,15 +629,28 @@ def predict(
     else:
         unclassified_threshold = min(unclassified_threshold, threshold)
 
+    _metrics["predictions_total"] += 1
+
+    # Extract structured HS/HTS codes BEFORE normalization strips them.
+    raw_combined = f"{cargo_description or ''} {commodity_description or ''}"
+    signals = extract_signals(raw_combined)
+    hs_implied = _hs_implied_categories(signals.hs_codes, chapter_to_category)
+
     quality = text_quality_check(cargo_description, commodity_description)
     if quality != "ok":
         return {
-            "categories":       [],
-            "confidence_state": "unclassified",
-            "reason":           "insufficient_input",
-            "scores":           {},
-            "embedding":        None,
-            "quality":          quality,
+            "categories":             [],
+            "confidence_state":       "unclassified",
+            "reason":                 "insufficient_input",
+            "scores":                 {},
+            "embedding":              None,
+            "text_quality":           quality,
+            "chunks_processed":       0,
+            "chunk_embeddings":       None,
+            "hs_codes_extracted":     signals.hs_codes,
+            "hs_implied_categories":  hs_implied,
+            "hs_text_mismatch":       False,
+            "reranked":               False,
         }
 
     text_for_embedding = build_query_text(cargo_description, commodity_description)
@@ -468,15 +665,23 @@ def predict(
             text_for_keywords, embedding, centroids, keywords, category_config,
             chapter_titles=chapter_titles,
         )
-        matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold)
+        matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold, margin_delta)
+        matched, reranked = _maybe_rerank(
+            text_for_embedding, matched, state, scores, category_descriptions
+        )
         return {
-            "categories":        matched,
-            "confidence_state":  state,
-            "reason":            reason,
-            "scores":            scores,
-            "embedding":         embedding,
-            "chunks_processed":  1,
-            "chunk_embeddings":  None,
+            "categories":            matched,
+            "confidence_state":      state,
+            "reason":                reason,
+            "scores":                scores,
+            "embedding":             embedding,
+            "text_quality":          quality,
+            "chunks_processed":      1,
+            "chunk_embeddings":      None,
+            "hs_codes_extracted":    signals.hs_codes,
+            "hs_implied_categories": hs_implied,
+            "hs_text_mismatch":      _hs_text_mismatch(hs_implied, matched),
+            "reranked":              reranked,
         }
 
     # ── Multi-chunk path ─────────────────────────────────────────────────
@@ -492,16 +697,24 @@ def predict(
 
     scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
     matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold)
+    matched, reranked = _maybe_rerank(
+        text_for_embedding, matched, state, scores, category_descriptions
+    )
     embedding = chunk_embeddings[winner_idx]
 
     return {
-        "categories":        matched,
-        "confidence_state":  state,
-        "reason":            reason,
-        "scores":            scores,
-        "embedding":         embedding,
-        "chunks_processed":  len(chunks),
-        "chunk_embeddings":  chunk_embeddings,
+        "categories":            matched,
+        "confidence_state":      state,
+        "reason":                reason,
+        "scores":                scores,
+        "embedding":             embedding,
+        "text_quality":          quality,
+        "chunks_processed":      len(chunks),
+        "chunk_embeddings":      chunk_embeddings,
+        "hs_codes_extracted":    signals.hs_codes,
+        "hs_implied_categories": hs_implied,
+        "hs_text_mismatch":      _hs_text_mismatch(hs_implied, matched),
+        "reranked":              reranked,
     }
 
 
@@ -513,6 +726,9 @@ def predict_batch(
     thresholds: list[float] | float = 0.45,
     unclassified_thresholds: list[float | None] | float | None = None,
     chapter_titles: dict[str, str] | None = None,
+    chapter_to_category: dict[str, str] | None = None,
+    category_descriptions: dict[str, str] | None = None,
+    margin_delta: float = MARGIN_DELTA_DEFAULT,
 ) -> list[dict]:
     """
     Batched inference — single model.encode() call for all valid rows.
@@ -529,6 +745,7 @@ def predict_batch(
 
     inputs_list = list(inputs)
     n = len(inputs_list)
+    _metrics["predictions_total"] += n
 
     if isinstance(thresholds, (int, float)):
         thresholds = [float(thresholds)] * n
@@ -538,6 +755,11 @@ def predict_batch(
     results: list[dict | None] = [None] * n
     valid_indices: list[int] = []
     keyword_texts_list: list[str] = []
+    # Raw query text per row — fed to the reranker when Phase 3 is enabled.
+    query_texts_list: list[str] = []
+    # HS signals extracted per-row (aligned with valid_indices).
+    row_hs_codes: list[list[str]] = []
+    row_hs_implied: list[list[str]] = []
     # all_chunks is the flat list passed to ONE embed_texts call. row_chunk_spans
     # lets us slice the resulting matrix back into per-row chunk groups.
     all_chunks: list[str] = []
@@ -545,22 +767,32 @@ def predict_batch(
 
     # Quality gate + normalization + chunking
     for i, (cargo, commodity) in enumerate(inputs_list):
+        signals = extract_signals(f"{cargo or ''} {commodity or ''}")
+        hs_implied = _hs_implied_categories(signals.hs_codes, chapter_to_category)
+
         quality = text_quality_check(cargo, commodity)
         if quality != "ok":
             results[i] = {
-                "categories":       [],
-                "confidence_state": "unclassified",
-                "reason":           "insufficient_input",
-                "scores":           {},
-                "embedding":        None,
-                "quality":          quality,
-                "chunks_processed": 0,
-                "chunk_embeddings": None,
+                "categories":            [],
+                "confidence_state":      "unclassified",
+                "reason":                "insufficient_input",
+                "scores":                {},
+                "embedding":             None,
+                "text_quality":          quality,
+                "chunks_processed":      0,
+                "chunk_embeddings":      None,
+                "hs_codes_extracted":    signals.hs_codes,
+                "hs_implied_categories": hs_implied,
+                "hs_text_mismatch":      False,
+                "reranked":              False,
             }
             continue
         valid_indices.append(i)
         text_for_embedding = build_query_text(cargo, commodity)
         keyword_texts_list.append(preprocess_normalize(f"{cargo} {commodity}"))
+        query_texts_list.append(text_for_embedding)
+        row_hs_codes.append(signals.hs_codes)
+        row_hs_implied.append(hs_implied)
         chunks = chunk_text(text_for_embedding, model)
         row_chunk_spans.append((len(all_chunks), len(chunks)))
         all_chunks.extend(chunks)
@@ -571,13 +803,17 @@ def predict_batch(
         for offset, idx in enumerate(valid_indices):
             start, count = row_chunk_spans[offset]
             row_embeddings = all_embeddings[start : start + count]  # (count, dim)
-            text_norm = keyword_texts_list[offset]
+            text_norm  = keyword_texts_list[offset]
+            hs_codes   = row_hs_codes[offset]
+            hs_implied = row_hs_implied[offset]
             thr = thresholds[idx]
             unc = unclassified_thresholds[idx]
             if unc is None:
                 unc = min(UNCLASSIFIED_THRESHOLD_DEFAULT, thr)
             else:
                 unc = min(unc, thr)
+
+            query_text = query_texts_list[offset]
 
             if count == 1:
                 # Fast path — same shape as today.
@@ -586,15 +822,23 @@ def predict_batch(
                     text_norm, embedding, centroids, keywords, category_config,
                     chapter_titles=chapter_titles,
                 )
-                matched, state, reason = _apply_bands(scores, max_score, thr, unc)
+                matched, state, reason = _apply_bands(scores, max_score, thr, unc, margin_delta)
+                matched, reranked = _maybe_rerank(
+                    query_text, matched, state, scores, category_descriptions
+                )
                 results[idx] = {
-                    "categories":        matched,
-                    "confidence_state":  state,
-                    "reason":            reason,
-                    "scores":            scores,
-                    "embedding":         embedding,
-                    "chunks_processed":  1,
-                    "chunk_embeddings":  None,
+                    "categories":            matched,
+                    "confidence_state":      state,
+                    "reason":                reason,
+                    "scores":                scores,
+                    "embedding":             embedding,
+                    "text_quality":          "ok",
+                    "chunks_processed":      1,
+                    "chunk_embeddings":      None,
+                    "hs_codes_extracted":    hs_codes,
+                    "hs_implied_categories": hs_implied,
+                    "hs_text_mismatch":      _hs_text_mismatch(hs_implied, matched),
+                    "reranked":              reranked,
                 }
             else:
                 per_chunk_scores: list[dict] = []
@@ -606,15 +850,23 @@ def predict_batch(
                     )
                     per_chunk_scores.append(s)
                 scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
-                matched, state, reason = _apply_bands(scores, max_score, thr, unc)
+                matched, state, reason = _apply_bands(scores, max_score, thr, unc, margin_delta)
+                matched, reranked = _maybe_rerank(
+                    query_text, matched, state, scores, category_descriptions
+                )
                 results[idx] = {
-                    "categories":        matched,
-                    "confidence_state":  state,
-                    "reason":            reason,
-                    "scores":            scores,
-                    "embedding":         row_embeddings[winner_idx],
-                    "chunks_processed":  count,
-                    "chunk_embeddings":  row_embeddings,
+                    "categories":            matched,
+                    "confidence_state":      state,
+                    "reason":                reason,
+                    "scores":                scores,
+                    "embedding":             row_embeddings[winner_idx],
+                    "text_quality":          "ok",
+                    "chunks_processed":      count,
+                    "chunk_embeddings":      row_embeddings,
+                    "hs_codes_extracted":    hs_codes,
+                    "hs_implied_categories": hs_implied,
+                    "hs_text_mismatch":      _hs_text_mismatch(hs_implied, matched),
+                    "reranked":              reranked,
                 }
 
     return results  # type: ignore[return-value]

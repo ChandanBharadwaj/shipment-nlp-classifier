@@ -139,6 +139,50 @@ Every decision returns `decision_reasons` (human-readable strings) and `hard_neg
 
 ---
 
+## Multi-label pollution defense (three layers)
+
+Single-token keywords like `motor`, `cell`, `park` legitimately appear in multiple categories' text. Without a defense, they push unrelated categories above the classification threshold and produce spurious secondary labels. We layer three independent mitigations — each solves a different failure mode, each is separately reversible:
+
+### Phase 1 — Top-margin rule (runtime, always on)
+
+In the `classified` band, secondary labels must be within `MARGIN_DELTA` (default **0.06**) of the top score. Primary decision remains: `final_score ≥ threshold` → matched; now it must *also* be within δ of the leader. Suppresses weak tail labels at zero cost (one comparison per category). Implementation: `_apply_bands` in [classifier.py](ml-service/classifier.py).
+
+### Phase 2 — Keyword discriminativeness filter (offline)
+
+A one-shot script that prunes single-token keywords whose embedding cosine against their assigned category's mean centroid falls below `MIN_KEYWORD_COSINE` (default **0.30**). Multi-token keywords are always kept — short phrases carry enough context to be semantically grounded. Writes a CSV snapshot before deleting; rollback is a plain `COPY … FROM csv`.
+
+```bash
+python -m diagnostics.prune_keywords                    # dry run, all categories
+python -m diagnostics.prune_keywords --category toys    # preview one category
+python -m diagnostics.prune_keywords --apply            # commit after review
+```
+
+### Phase 3 — Cross-encoder reranker (runtime, feature-flagged, default **off**)
+
+When two or more labels survive Phase 1, an optional cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) re-scores each `(shipment_text, category_description)` pair jointly. Logits are squashed through sigmoid, so the margin of **0.15** is interpretable in (0, 1) probability space — same threshold is meaningful across different CE models. Category descriptions are auto-built at startup from the top-10 weighted keywords per category.
+
+- Default off. Flip `RERANKER_ENABLED=true` to enable; `/health` reports state.
+- Zero overhead when disabled — the model is never loaded.
+- When enabled, only fires on rows with ≥2 post-margin candidates (~50–150 ms added on those rows).
+- Fires are counted at `/metrics` so ops can see how often Phase 3 actually does anything.
+
+### Ordering & safety
+
+Always prune **before** enabling the reranker. Category descriptions are built from top-weighted keywords, so pruning afterwards would leave the reranker reading a stale description set until `/reload`. `/reload` rebuilds descriptions in lockstep with the keyword table, so the documented sequence is: prune → `/reload` → set `RERANKER_ENABLED=true` → restart.
+
+### Tuning
+
+Two decision knobs (`threshold`, `margin_delta`) are gridable cheaply with [calibrate.py](ml-service/calibrate.py), which embeds each labeled sample once and re-applies the decision logic per grid cell. A 42-cell sweep runs in the time of one full evaluation.
+
+```bash
+python calibrate.py                                     # validation split, default grid
+python calibrate.py --thresholds 0.40 0.45 0.50 --deltas 0.04 0.06 0.08
+```
+
+Output is an F1 heatmap plus the top-k `(threshold, delta)` recommendations with precision/recall/TP-FP-FN alongside.
+
+---
+
 ## What this approach gets right
 
 ### Paraphrase resilience (the regex problem, solved)
@@ -201,6 +245,8 @@ The Minerva proposal calls for a 3-layer screening architecture: **Layer 1 hard 
 | Throughput for 50,000 shipments (CPU) | **~60-90 seconds** |
 | Extra inference cost added by compliance layer | **~0** (re-uses classifier embedding) |
 | Compliance test suite | **24/24 passing** |
+| Chunking test suite | **26/26 passing** |
+| Pollution-defense unit suite (`tests/`) | **36/36 passing** |
 
 ---
 
@@ -220,16 +266,22 @@ shipment-nlp-classifier/
 │
 ├── ml-service/
 │   ├── main.py                ← FastAPI app: /classify, /classify/batch,
-│   │                            /reload, /health
-│   ├── classifier.py          ← embedding, scoring, calibration, confidence
+│   │                            /reload, /health, /metrics
+│   ├── classifier.py          ← embedding, scoring, margin rule, reranker hook
+│   ├── config.py              ← all tunables + env overrides (single source) ★
 │   ├── compliance.py          ← semantic compliance decision layer ★
 │   ├── chunking.py            ← token-aware long-input splitter ★
 │   ├── risk_profile.json      ← global + per-category risk phrases ★
+│   ├── calibrate.py           ← 2D grid sweep (threshold × margin_delta) ★
 │   ├── test_compliance.py     ← 24 smoke tests ★
 │   ├── test_chunking.py       ← 26 chunking + tail-risk tests ★
+│   ├── tests/                 ← 36 pytest unit tests — margin rule,
+│   │                            reranker, prune, metrics ★
+│   ├── diagnostics/
+│   │   └── prune_keywords.py  ← offline keyword discriminativeness filter ★
 │   ├── centroid_builder.py    ← rebuild centroids from labeled data
 │   ├── fit_calibration.py     ← Platt sigmoid calibration
-│   ├── evaluate_threshold.py  ← threshold tuning on validation/test splits
+│   ├── evaluate_threshold.py  ← threshold/margin tuning on val/test splits
 │   └── discover_unknowns.py   ← HDBSCAN clustering on unclassified shipments
 │
 └── scripts/                   ← data generation utilities
@@ -272,11 +324,12 @@ Endpoints:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness + load stats (categories, HS chapters, risk vectors, calibration) |
+| `GET` | `/health` | Liveness + load stats (categories, HS chapters, risk vectors, calibration, `reranker_enabled`) |
+| `GET` | `/metrics` | In-process counters: `predictions_total`, `margin_suppressions_total`, `rerank_fires_total`, `rerank_drops_total` |
 | `GET` | `/risk-levels` | `{category: risk_level}` map for UI rendering — auto-refreshes on `/reload` |
 | `POST` | `/classify` | Single shipment → category + compliance decision |
 | `POST` | `/classify/batch` | Up to 500 shipments per call, single batched embedding |
-| `POST` | `/reload` | Reload centroids, keywords, calibration, and risk vectors from disk + DB |
+| `POST` | `/reload` | Reload centroids, keywords, calibration, risk vectors, and category descriptions |
 
 Auto-generated OpenAPI docs at <http://localhost:8000/docs> when the service is running.
 

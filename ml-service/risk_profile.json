@@ -1,657 +1,1173 @@
 {
-  "_doc": "Semantic risk profile. Each phrase + aliases are embedded at startup. Matching uses cosine similarity against shipment embeddings — not keyword regex. Global entries always BLOCK on match (use `risky: true`). Category entries support `action: block|review`.",
-
+  "_doc": "Semantic risk profile. Each phrase + aliases are embedded at startup. Matching uses cosine similarity against shipment embeddings — not keyword regex. Any global_blocked or category hard_negative hit above `default_thresholds.risky` flags the shipment as risky, unless a category `safe_exceptions` entry deflects that specific hit by matching with higher similarity (e.g. ordinary cotton garments deflecting the UFLPA forced-labor cotton anchor). Output is a single `is_risky` bit; there is no block/review tiering and no per-category risk tiering.",
   "default_thresholds": {
-    "block": 0.62,
-    "review": 0.55
+    "risky": 0.55
   },
-
   "global_blocked": [
     {
       "phrase": "depleted uranium nuclear material",
-      "aliases": ["DU penetrator", "spent uranium metal", "uranium-238 material", "spent nuclear fuel rods", "nuclear fuel waste", "radioactive uranium rods"],
+      "aliases": [
+        "DU penetrator",
+        "spent uranium metal",
+        "uranium-238 material",
+        "spent nuclear fuel rods",
+        "nuclear fuel waste",
+        "radioactive uranium rods"
+      ],
       "risky": true,
       "reason": "nuclear material — IAEA controlled"
     },
     {
       "phrase": "yellowcake uranium concentrate",
-      "aliases": ["uranium oxide concentrate", "U3O8 powder"],
+      "aliases": [
+        "uranium oxide concentrate",
+        "U3O8 powder"
+      ],
       "risky": true,
       "reason": "uranium concentrate — IAEA controlled"
     },
     {
       "phrase": "plutonium fissile material",
-      "aliases": ["weapons-grade plutonium", "Pu-239"],
+      "aliases": [
+        "weapons-grade plutonium",
+        "Pu-239"
+      ],
       "risky": true,
       "reason": "nuclear material — IAEA controlled"
     },
     {
       "phrase": "uranium enrichment centrifuge",
-      "aliases": ["gas centrifuge cascade", "isotope separation equipment"],
+      "aliases": [
+        "gas centrifuge cascade",
+        "isotope separation equipment"
+      ],
       "risky": true,
       "reason": "nuclear enrichment equipment — NSG controlled"
     },
     {
       "phrase": "nerve agent chemical weapon",
-      "aliases": ["sarin gas", "VX nerve agent", "novichok agent", "tabun chemical weapon"],
+      "aliases": [
+        "sarin gas",
+        "VX nerve agent",
+        "novichok agent",
+        "tabun chemical weapon"
+      ],
       "risky": true,
       "reason": "chemical weapon — CWC prohibited"
     },
     {
       "phrase": "mustard gas blister agent",
-      "aliases": ["sulfur mustard", "yperite chemical weapon"],
+      "aliases": [
+        "sulfur mustard",
+        "yperite chemical weapon"
+      ],
       "risky": true,
       "reason": "chemical weapon — CWC prohibited"
     },
     {
       "phrase": "ricin biological toxin",
-      "aliases": ["ricin poison extract", "castor bean toxin weapon"],
+      "aliases": [
+        "ricin poison extract",
+        "castor bean toxin weapon"
+      ],
       "risky": true,
       "reason": "biological toxin — BWC controlled"
     },
     {
       "phrase": "anthrax biological agent",
-      "aliases": ["bacillus anthracis spores", "weaponized anthrax"],
+      "aliases": [
+        "bacillus anthracis spores",
+        "weaponized anthrax"
+      ],
       "risky": true,
       "reason": "biological agent — BWC controlled"
     },
     {
       "phrase": "cluster munition bomblet",
-      "aliases": ["cluster bomb submunition", "CBU cluster weapon"],
+      "aliases": [
+        "cluster bomb submunition",
+        "CBU cluster weapon"
+      ],
       "risky": true,
       "reason": "prohibited weapon — Convention on Cluster Munitions"
     },
     {
       "phrase": "anti-personnel landmine",
-      "aliases": ["anti-personnel mine", "AP mine buried explosive", "landmine antipersonnel"],
+      "aliases": [
+        "anti-personnel mine",
+        "AP mine buried explosive",
+        "landmine antipersonnel"
+      ],
       "risky": true,
       "reason": "prohibited weapon — Ottawa Treaty"
     },
     {
       "phrase": "signal jammer electronic jamming device",
-      "aliases": ["GPS jammer", "frequency jammer", "RF signal blocker", "cell phone jammer", "communications jammer"],
+      "aliases": [
+        "GPS jammer",
+        "frequency jammer",
+        "RF signal blocker",
+        "cell phone jammer",
+        "communications jammer"
+      ],
       "risky": true,
       "reason": "illegal jamming device — FCC/ITU prohibited"
     },
     {
       "phrase": "counterfeit goods fake replica unauthorized",
-      "aliases": ["knock-off branded merchandise", "pirated counterfeit products", "fake branded goods"],
+      "aliases": [
+        "knock-off branded merchandise",
+        "pirated counterfeit products",
+        "fake branded goods"
+      ],
       "risky": true,
       "reason": "counterfeit/pirated goods — IP law violation"
     }
   ],
-
   "categories": {
     "agriculture": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "opium poppy narcotic crop",
-          "aliases": ["papaver somniferum cultivation", "raw opium harvest", "poppy straw narcotic"],
-          "action": "block",
+          "aliases": [
+            "papaver somniferum cultivation",
+            "raw opium harvest",
+            "poppy straw narcotic"
+          ],
           "reason": "controlled narcotic crop — UN Single Convention"
         },
         {
           "phrase": "coca leaf cocaine plant",
-          "aliases": ["erythroxylum coca harvest", "coca bush cultivation"],
-          "action": "block",
+          "aliases": [
+            "erythroxylum coca harvest",
+            "coca bush cultivation"
+          ],
           "reason": "controlled narcotic crop — UN Single Convention"
         },
         {
           "phrase": "cannabis marijuana plant",
-          "aliases": ["hemp THC crop", "marijuana cultivation", "hashish plant material"],
-          "action": "review",
+          "aliases": [
+            "hemp THC crop",
+            "marijuana cultivation",
+            "hashish plant material"
+          ],
           "reason": "controlled substance — jurisdiction-dependent"
         },
         {
           "phrase": "endangered species wildlife CITES",
-          "aliases": ["protected animal species", "endangered wildlife trade", "CITES listed organism"],
-          "action": "review",
+          "aliases": [
+            "protected animal species",
+            "endangered wildlife trade",
+            "CITES listed organism"
+          ],
           "reason": "CITES protected species — trade restricted"
         }
       ]
     },
     "automotive": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "armored military vehicle",
-          "aliases": ["armoured personnel carrier", "armor-plated vehicle", "bulletproof military transport", "MRAP mine resistant vehicle"],
-          "action": "review",
+          "aliases": [
+            "armoured personnel carrier",
+            "armor-plated vehicle",
+            "bulletproof military transport",
+            "MRAP mine resistant vehicle"
+          ],
           "reason": "armored vehicle — possible defense/ITAR item"
         },
         {
           "phrase": "military combat vehicle",
-          "aliases": ["tactical military truck", "infantry fighting vehicle", "combat engineering vehicle"],
-          "action": "review",
+          "aliases": [
+            "tactical military truck",
+            "infantry fighting vehicle",
+            "combat engineering vehicle"
+          ],
           "reason": "military vehicle — defense classification"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "used passenger vehicle ordinary car",
+          "aliases": [
+            "used toyota car",
+            "used lexus sedan",
+            "second-hand passenger automobile",
+            "pre-owned civilian car"
+          ],
+          "deflects": [
+            "armored military vehicle",
+            "military combat vehicle"
+          ],
+          "reason": "ordinary used passenger vehicle — no military or armored indicators"
+        },
+        {
+          "phrase": "automobile spare parts components civilian",
+          "aliases": [
+            "car engine parts",
+            "auto body panels",
+            "vehicle brake pads",
+            "civilian automotive components"
+          ],
+          "deflects": [
+            "armored military vehicle",
+            "military combat vehicle"
+          ],
+          "reason": "civilian automotive spare parts — not military vehicle components"
+        },
+        {
+          "phrase": "motorcycle scooter two-wheeler civilian",
+          "aliases": [
+            "motorbike consumer",
+            "scooter moped"
+          ],
+          "deflects": [
+            "armored military vehicle",
+            "military combat vehicle"
+          ],
+          "reason": "civilian two-wheeler — not a military vehicle"
         }
       ]
     },
     "chemicals": {
-      "risk_level": "high",
       "hard_negatives": [
         {
           "phrase": "chemical weapon precursor CWC scheduled",
-          "aliases": ["CWC Schedule 1 chemical", "CWC Schedule 2 substance", "chemical weapons convention controlled"],
-          "action": "block",
+          "aliases": [
+            "CWC Schedule 1 chemical",
+            "CWC Schedule 2 substance",
+            "chemical weapons convention controlled"
+          ],
           "reason": "CWC scheduled chemical — strictly controlled"
         },
         {
           "phrase": "thiodiglycol mustard gas precursor",
-          "aliases": ["2,2-thiodiethanol", "sulfur mustard precursor chemical"],
-          "action": "block",
+          "aliases": [
+            "2,2-thiodiethanol",
+            "sulfur mustard precursor chemical"
+          ],
           "reason": "CWC Schedule 2 — mustard gas precursor"
         },
         {
           "phrase": "pseudoephedrine drug precursor",
-          "aliases": ["ephedrine precursor", "methamphetamine precursor chemical", "ephedra alkaloid extraction"],
-          "action": "review",
+          "aliases": [
+            "ephedrine precursor",
+            "methamphetamine precursor chemical",
+            "ephedra alkaloid extraction"
+          ],
           "reason": "controlled drug precursor — methamphetamine production"
         },
         {
           "phrase": "acetic anhydride heroin precursor",
-          "aliases": ["acetyl anhydride drug precursor", "heroin processing chemical"],
-          "action": "review",
+          "aliases": [
+            "acetyl anhydride drug precursor",
+            "heroin processing chemical"
+          ],
           "reason": "controlled drug precursor — heroin processing"
         },
         {
           "phrase": "potassium permanganate drug precursor",
-          "aliases": ["KMnO4 cocaine processing", "permanganate oxidizer precursor"],
-          "action": "review",
+          "aliases": [
+            "KMnO4 cocaine processing",
+            "permanganate oxidizer precursor"
+          ],
           "reason": "controlled drug precursor — cocaine processing"
         },
         {
           "phrase": "phosphorus trichloride chemical weapon",
-          "aliases": ["PCl3 nerve agent precursor", "phosphorus trichloride industrial"],
-          "action": "review",
+          "aliases": [
+            "PCl3 nerve agent precursor",
+            "phosphorus trichloride industrial"
+          ],
           "reason": "CWC Schedule 3 — dual-use chemical"
         },
         {
           "phrase": "hydrogen cyanide poison gas",
-          "aliases": ["HCN prussic acid", "cyanide gas toxic", "hydrogen cyanide industrial"],
-          "action": "review",
+          "aliases": [
+            "HCN prussic acid",
+            "cyanide gas toxic",
+            "hydrogen cyanide industrial"
+          ],
           "reason": "CWC Schedule 3 — dual-use toxic chemical"
         },
         {
           "phrase": "ergotamine LSD precursor",
-          "aliases": ["ergot alkaloid drug precursor", "lysergic acid diethylamide precursor"],
-          "action": "review",
+          "aliases": [
+            "ergot alkaloid drug precursor",
+            "lysergic acid diethylamide precursor"
+          ],
           "reason": "controlled drug precursor — LSD production"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "quaternary ammonium disinfectant cleaner",
+          "aliases": [
+            "benzalkonium chloride disinfectant",
+            "quat sanitizer surface cleaner",
+            "household disinfectant ammonium"
+          ],
+          "deflects": [
+            "chemical weapon precursor CWC scheduled",
+            "phosphorus trichloride chemical weapon",
+            "hydrogen cyanide poison gas"
+          ],
+          "reason": "commercial disinfectant — not a CWC-scheduled precursor"
+        },
+        {
+          "phrase": "common industrial solvent cleaning",
+          "aliases": [
+            "isopropyl alcohol industrial",
+            "acetone solvent bulk",
+            "ethanol industrial denatured"
+          ],
+          "deflects": [
+            "chemical weapon precursor CWC scheduled",
+            "acetic anhydride heroin precursor",
+            "potassium permanganate drug precursor"
+          ],
+          "reason": "common industrial solvent — not a controlled precursor"
+        },
+        {
+          "phrase": "laboratory reagent analytical chemistry",
+          "aliases": [
+            "analytical grade reagent",
+            "lab chemicals research grade",
+            "standard buffer reagent"
+          ],
+          "deflects": [
+            "chemical weapon precursor CWC scheduled",
+            "thiodiglycol mustard gas precursor"
+          ],
+          "reason": "standard laboratory reagent — not a weaponizable precursor"
         }
       ]
     },
     "construction": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "asbestos fiber insulation material",
-          "aliases": ["chrysotile asbestos", "asbestos cement sheet", "asbestos containing material ACM"],
-          "action": "review",
+          "aliases": [
+            "chrysotile asbestos",
+            "asbestos cement sheet",
+            "asbestos containing material ACM"
+          ],
           "reason": "banned/restricted substance — Rotterdam Convention"
         },
         {
           "phrase": "blast resistant military fortification",
-          "aliases": ["bunker construction material", "blast-proof shelter", "military fortification structure"],
-          "action": "review",
+          "aliases": [
+            "bunker construction material",
+            "blast-proof shelter",
+            "military fortification structure"
+          ],
           "reason": "possible military fortification — defense concern"
         }
       ]
     },
     "cosmetics": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "mercury skin lightening cream",
-          "aliases": ["mercurous chloride cosmetic", "mercury-based skin bleach", "inorganic mercury cosmetic"],
-          "action": "review",
+          "aliases": [
+            "mercurous chloride cosmetic",
+            "mercury-based skin bleach",
+            "inorganic mercury cosmetic"
+          ],
           "reason": "banned cosmetic ingredient — Minamata Convention"
         },
         {
           "phrase": "hydroquinone skin bleaching agent",
-          "aliases": ["hydroquinone lightening cream", "skin depigmenting agent high concentration"],
-          "action": "review",
+          "aliases": [
+            "hydroquinone lightening cream",
+            "skin depigmenting agent high concentration"
+          ],
           "reason": "restricted skin-lightening agent — concentration limits"
         },
         {
           "phrase": "anabolic steroid cosmetic product",
-          "aliases": ["steroid-laced cream", "testosterone topical cosmetic", "hormonal cosmetic product"],
-          "action": "review",
+          "aliases": [
+            "steroid-laced cream",
+            "testosterone topical cosmetic",
+            "hormonal cosmetic product"
+          ],
           "reason": "controlled pharmaceutical in cosmetic form"
         }
       ]
     },
     "defense": {
-      "risk_level": "high",
       "hard_negatives": [
         {
           "phrase": "man-portable air defense system MANPADS",
-          "aliases": ["shoulder-fired surface-to-air missile", "stinger missile launcher", "portable SAM system"],
-          "action": "block",
+          "aliases": [
+            "shoulder-fired surface-to-air missile",
+            "stinger missile launcher",
+            "portable SAM system"
+          ],
           "reason": "MANPADS — strictly controlled ITAR Category IV"
         },
         {
           "phrase": "guided missile weapon system",
-          "aliases": ["cruise missile", "ballistic missile components", "missile guidance system", "MTCR controlled missile"],
-          "action": "block",
+          "aliases": [
+            "cruise missile",
+            "ballistic missile components",
+            "missile guidance system",
+            "MTCR controlled missile"
+          ],
           "reason": "missile technology — MTCR controlled"
         },
         {
           "phrase": "military warhead explosive ordnance",
-          "aliases": ["bomb warhead detonator", "military explosive payload", "torpedo warhead naval"],
-          "action": "block",
+          "aliases": [
+            "bomb warhead detonator",
+            "military explosive payload",
+            "torpedo warhead naval"
+          ],
           "reason": "weapons component — ITAR controlled"
         },
         {
           "phrase": "firearm silencer suppressor",
-          "aliases": ["gun suppressor muzzle", "sound moderator firearm", "silenced weapon attachment"],
-          "action": "review",
+          "aliases": [
+            "gun suppressor muzzle",
+            "sound moderator firearm",
+            "silenced weapon attachment"
+          ],
           "reason": "firearm accessory — NFA regulated"
         },
         {
           "phrase": "night vision military optics",
-          "aliases": ["image intensifier tube", "thermal weapon sight", "infrared night vision goggles", "ITAR controlled optics"],
-          "action": "review",
+          "aliases": [
+            "image intensifier tube",
+            "thermal weapon sight",
+            "infrared night vision goggles",
+            "ITAR controlled optics"
+          ],
           "reason": "dual-use military technology — EAR/ITAR controlled"
         },
         {
           "phrase": "grenade launcher heavy weapon",
-          "aliases": ["rocket propelled grenade RPG", "40mm grenade launcher", "under-barrel grenade launcher"],
-          "action": "review",
+          "aliases": [
+            "rocket propelled grenade RPG",
+            "40mm grenade launcher",
+            "under-barrel grenade launcher"
+          ],
           "reason": "heavy weapon — export license required"
         }
       ]
     },
     "electronics": {
-      "risk_level": "medium",
       "hard_negatives": [
         {
           "phrase": "encryption cryptographic hardware module",
-          "aliases": ["hardware security module HSM", "cryptographic accelerator", "AES encryption device", "end-to-end encryption appliance"],
-          "action": "review",
+          "aliases": [
+            "hardware security module HSM",
+            "cryptographic accelerator",
+            "AES encryption device",
+            "end-to-end encryption appliance"
+          ],
           "reason": "dual-use — Wassenaar Arrangement Category 5 Part 2"
         },
         {
           "phrase": "surveillance interception equipment",
-          "aliases": ["wiretapping device", "communications intercept system", "lawful interception equipment", "spyware hardware"],
-          "action": "review",
+          "aliases": [
+            "wiretapping device",
+            "communications intercept system",
+            "lawful interception equipment",
+            "spyware hardware"
+          ],
           "reason": "surveillance technology — human rights concern"
         },
         {
           "phrase": "advanced FPGA semiconductor chip",
-          "aliases": ["high-performance field programmable gate array", "advanced GPU compute chip", "AI training semiconductor"],
-          "action": "review",
+          "aliases": [
+            "high-performance field programmable gate array",
+            "advanced GPU compute chip",
+            "AI training semiconductor"
+          ],
           "reason": "advanced semiconductor — export control (BIS Entity List)"
         },
         {
           "phrase": "radar electronic warfare system",
-          "aliases": ["electronic countermeasure ECM", "radar jamming equipment", "electronic warfare suite"],
-          "action": "review",
+          "aliases": [
+            "electronic countermeasure ECM",
+            "radar jamming equipment",
+            "electronic warfare suite"
+          ],
           "reason": "military electronics — Wassenaar ML11"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "consumer household kitchen electronics",
+          "aliases": [
+            "kitchen appliance blender toaster",
+            "household consumer electronic device",
+            "small home appliance"
+          ],
+          "deflects": [
+            "encryption cryptographic hardware module",
+            "surveillance interception equipment",
+            "radar electronic warfare system"
+          ],
+          "reason": "consumer household electronics — not dual-use or military"
+        },
+        {
+          "phrase": "consumer smartphone laptop computer",
+          "aliases": [
+            "mobile phone handset",
+            "personal laptop notebook",
+            "tablet consumer device"
+          ],
+          "deflects": [
+            "advanced FPGA semiconductor chip",
+            "surveillance interception equipment",
+            "encryption cryptographic hardware module"
+          ],
+          "reason": "consumer-grade computing device — not an export-controlled advanced semiconductor"
+        },
+        {
+          "phrase": "consumer audio video entertainment",
+          "aliases": [
+            "television set consumer",
+            "headphones speakers audio",
+            "consumer camera video"
+          ],
+          "deflects": [
+            "surveillance interception equipment",
+            "radar electronic warfare system"
+          ],
+          "reason": "consumer entertainment electronics — not surveillance or military"
         }
       ]
     },
     "energy": {
-      "risk_level": "medium",
       "hard_negatives": [
         {
           "phrase": "enriched uranium nuclear fuel",
-          "aliases": ["uranium enrichment product", "low-enriched uranium LEU", "highly enriched uranium HEU", "U-235 enriched"],
-          "action": "block",
+          "aliases": [
+            "uranium enrichment product",
+            "low-enriched uranium LEU",
+            "highly enriched uranium HEU",
+            "U-235 enriched"
+          ],
           "reason": "enriched nuclear fuel — IAEA/NSG controlled"
         },
         {
           "phrase": "heavy water nuclear reactor",
-          "aliases": ["deuterium oxide D2O reactor grade", "heavy water moderator"],
-          "action": "block",
+          "aliases": [
+            "deuterium oxide D2O reactor grade",
+            "heavy water moderator"
+          ],
           "reason": "nuclear reactor material — NSG controlled"
         },
         {
           "phrase": "tritium radioactive isotope",
-          "aliases": ["tritium gas ampoule", "hydrogen-3 radioactive", "tritium luminescent"],
-          "action": "review",
+          "aliases": [
+            "tritium gas ampoule",
+            "hydrogen-3 radioactive",
+            "tritium luminescent"
+          ],
           "reason": "nuclear material — IAEA controlled"
         }
       ]
     },
     "food_beverages": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "industrial ethanol non-food grade",
-          "aliases": ["denatured alcohol industrial", "ethanol 95% technical grade", "methanol toxic alcohol"],
-          "action": "review",
+          "aliases": [
+            "denatured alcohol industrial",
+            "ethanol 95% technical grade",
+            "methanol toxic alcohol"
+          ],
           "reason": "non-food-grade alcohol — possible misclassification"
         },
         {
           "phrase": "melamine food adulterant",
-          "aliases": ["melamine contaminated powder", "adulterated food product", "food contamination agent"],
-          "action": "review",
+          "aliases": [
+            "melamine contaminated powder",
+            "adulterated food product",
+            "food contamination agent"
+          ],
           "reason": "food safety — toxic adulterant"
         },
         {
           "phrase": "khat stimulant plant",
-          "aliases": ["catha edulis leaves", "miraa stimulant herb", "qat plant narcotic"],
-          "action": "review",
+          "aliases": [
+            "catha edulis leaves",
+            "miraa stimulant herb",
+            "qat plant narcotic"
+          ],
           "reason": "controlled stimulant — jurisdiction-dependent"
         }
       ]
     },
     "furniture": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "rosewood CITES protected timber",
-          "aliases": ["dalbergia protected wood", "CITES Appendix II timber", "endangered hardwood species"],
-          "action": "review",
+          "aliases": [
+            "dalbergia protected wood",
+            "CITES Appendix II timber",
+            "endangered hardwood species"
+          ],
           "reason": "CITES Appendix II — protected timber species"
         },
         {
           "phrase": "illegal logging deforestation timber",
-          "aliases": ["unverified tropical hardwood", "illegal timber harvest", "conflict timber"],
-          "action": "review",
+          "aliases": [
+            "unverified tropical hardwood",
+            "illegal timber harvest",
+            "conflict timber"
+          ],
           "reason": "EU Timber Regulation / Lacey Act — illegal logging"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "ordinary wooden furniture household",
+          "aliases": [
+            "pine oak furniture",
+            "plywood MDF furniture",
+            "upholstered sofa chair",
+            "dining table set wood"
+          ],
+          "deflects": [
+            "rosewood CITES protected timber",
+            "illegal logging deforestation timber"
+          ],
+          "reason": "common wooden furniture — not CITES-protected or conflict timber"
+        },
+        {
+          "phrase": "office furniture commercial",
+          "aliases": [
+            "office desk chair commercial",
+            "filing cabinet steel furniture",
+            "conference room furniture"
+          ],
+          "deflects": [
+            "rosewood CITES protected timber",
+            "illegal logging deforestation timber",
+            "shahtoosh Tibetan antelope wool"
+          ],
+          "reason": "commercial office furniture — no protected materials"
         }
       ]
     },
     "luxury": {
-      "risk_level": "medium",
       "hard_negatives": [
         {
           "phrase": "elephant ivory tusk banned",
-          "aliases": ["raw ivory carving", "ivory ornament", "worked elephant ivory", "mammoth ivory"],
-          "action": "block",
+          "aliases": [
+            "raw ivory carving",
+            "ivory ornament",
+            "worked elephant ivory",
+            "mammoth ivory"
+          ],
           "reason": "CITES banned — elephant ivory trade prohibited"
         },
         {
           "phrase": "rhinoceros horn product",
-          "aliases": ["rhino horn powder", "rhinoceros keratin product", "rhino horn medicine"],
-          "action": "block",
+          "aliases": [
+            "rhino horn powder",
+            "rhinoceros keratin product",
+            "rhino horn medicine"
+          ],
           "reason": "CITES banned — rhinoceros products prohibited"
         },
         {
           "phrase": "shahtoosh Tibetan antelope wool",
-          "aliases": ["chiru wool shawl", "Tibetan antelope hair", "shahtoosh pashmina"],
-          "action": "block",
+          "aliases": [
+            "chiru wool shawl",
+            "Tibetan antelope hair",
+            "shahtoosh pashmina"
+          ],
           "reason": "CITES Appendix I — Tibetan antelope endangered"
         },
         {
           "phrase": "conflict diamond blood diamond",
-          "aliases": ["non-Kimberley Process diamond", "unverified origin diamond", "conflict zone gemstone"],
-          "action": "block",
+          "aliases": [
+            "non-Kimberley Process diamond",
+            "unverified origin diamond",
+            "conflict zone gemstone"
+          ],
           "reason": "Kimberley Process violation — conflict diamond"
         },
         {
           "phrase": "tortoiseshell hawksbill turtle",
-          "aliases": ["sea turtle shell product", "bekko tortoiseshell", "hawksbill carapace"],
-          "action": "review",
+          "aliases": [
+            "sea turtle shell product",
+            "bekko tortoiseshell",
+            "hawksbill carapace"
+          ],
           "reason": "CITES Appendix I — hawksbill turtle endangered"
         }
       ]
     },
     "machinery": {
-      "risk_level": "medium",
       "hard_negatives": [
         {
           "phrase": "5-axis CNC machining center advanced",
-          "aliases": ["five-axis milling machine", "simultaneous 5-axis CNC", "multi-axis precision machining"],
-          "action": "review",
+          "aliases": [
+            "five-axis milling machine",
+            "simultaneous 5-axis CNC",
+            "multi-axis precision machining"
+          ],
           "reason": "advanced machine tool — Wassenaar Category 2"
         },
         {
           "phrase": "maraging steel high-strength alloy",
-          "aliases": ["maraging 250 steel", "18Ni maraging alloy", "ultra-high-strength steel missile grade"],
-          "action": "review",
+          "aliases": [
+            "maraging 250 steel",
+            "18Ni maraging alloy",
+            "ultra-high-strength steel missile grade"
+          ],
           "reason": "nuclear/missile-grade alloy — NSG Trigger List"
         },
         {
           "phrase": "vacuum induction furnace advanced",
-          "aliases": ["vacuum arc remelting furnace", "electron beam melting furnace", "specialty alloy processing furnace"],
-          "action": "review",
+          "aliases": [
+            "vacuum arc remelting furnace",
+            "electron beam melting furnace",
+            "specialty alloy processing furnace"
+          ],
           "reason": "dual-use — advanced materials processing"
         },
         {
           "phrase": "flow forming spinning machine",
-          "aliases": ["metal spinning flow forming", "tube flow forming lathe", "rocket motor casing forming"],
-          "action": "review",
+          "aliases": [
+            "metal spinning flow forming",
+            "tube flow forming lathe",
+            "rocket motor casing forming"
+          ],
           "reason": "dual-use — missile component manufacturing (MTCR)"
         },
         {
           "phrase": "industrial centrifuge separation",
-          "aliases": ["high-speed centrifuge", "gas centrifuge rotor", "ultracentrifuge equipment"],
-          "action": "review",
+          "aliases": [
+            "high-speed centrifuge",
+            "gas centrifuge rotor",
+            "ultracentrifuge equipment"
+          ],
           "reason": "possible nuclear enrichment — NSG controlled"
         }
       ]
     },
     "metals": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "beryllium metal nuclear aerospace",
-          "aliases": ["beryllium copper alloy", "beryllium oxide ceramic", "BeO nuclear moderator"],
-          "action": "review",
+          "aliases": [
+            "beryllium copper alloy",
+            "beryllium oxide ceramic",
+            "BeO nuclear moderator"
+          ],
           "reason": "nuclear/aerospace controlled material — NSG Trigger List"
         },
         {
           "phrase": "tungsten carbide armor-piercing",
-          "aliases": ["WC armor penetrator", "tungsten heavy alloy kinetic", "tungsten alloy military projectile"],
-          "action": "review",
+          "aliases": [
+            "WC armor penetrator",
+            "tungsten heavy alloy kinetic",
+            "tungsten alloy military projectile"
+          ],
           "reason": "dual-use — armor-piercing ammunition component"
         },
         {
           "phrase": "maraging steel missile grade",
-          "aliases": ["maraging 350 alloy", "ultra-high-strength nickel steel", "rocket motor case steel"],
-          "action": "review",
+          "aliases": [
+            "maraging 350 alloy",
+            "ultra-high-strength nickel steel",
+            "rocket motor case steel"
+          ],
           "reason": "nuclear-grade steel — NSG/MTCR controlled"
         },
         {
           "phrase": "conflict mineral tantalum coltan",
-          "aliases": ["columbite-tantalite ore", "conflict coltan Congo", "3TG conflict mineral", "tantalum tin tungsten gold conflict"],
-          "action": "review",
+          "aliases": [
+            "columbite-tantalite ore",
+            "conflict coltan Congo",
+            "3TG conflict mineral",
+            "tantalum tin tungsten gold conflict"
+          ],
           "reason": "conflict mineral — Dodd-Frank Section 1502 / EU Conflict Minerals Regulation"
         }
       ]
     },
     "minerals": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "uranium ore nuclear source material",
-          "aliases": ["pitchblende uranium ore", "uraninite mineral", "natural uranium concentrate"],
-          "action": "block",
+          "aliases": [
+            "pitchblende uranium ore",
+            "uraninite mineral",
+            "natural uranium concentrate"
+          ],
           "reason": "nuclear source material — IAEA controlled"
         },
         {
           "phrase": "thorium radioactive mineral",
-          "aliases": ["monazite thorium ore", "thorium oxide powder", "thorium-232 source material"],
-          "action": "review",
+          "aliases": [
+            "monazite thorium ore",
+            "thorium oxide powder",
+            "thorium-232 source material"
+          ],
           "reason": "nuclear source material — IAEA controlled"
         },
         {
           "phrase": "conflict mineral coltan tantalum",
-          "aliases": ["3TG mineral conflict zone", "artisanal conflict mining", "blood mineral"],
-          "action": "review",
+          "aliases": [
+            "3TG mineral conflict zone",
+            "artisanal conflict mining",
+            "blood mineral"
+          ],
           "reason": "conflict mineral — Dodd-Frank / EU due diligence"
         }
       ]
     },
     "paper": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "banknote currency paper security",
-          "aliases": ["security thread paper", "currency printing paper", "intaglio banknote stock"],
-          "action": "block",
+          "aliases": [
+            "security thread paper",
+            "currency printing paper",
+            "intaglio banknote stock"
+          ],
           "reason": "currency paper — controlled material"
         },
         {
           "phrase": "counterfeit document printing",
-          "aliases": ["forged document paper", "fake passport printing", "counterfeit certificate stock"],
-          "action": "block",
+          "aliases": [
+            "forged document paper",
+            "fake passport printing",
+            "counterfeit certificate stock"
+          ],
           "reason": "counterfeit document materials"
         }
       ]
     },
     "perishables": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "pangolin endangered species meat",
-          "aliases": ["pangolin scales", "Manis species product", "scaly anteater"],
-          "action": "block",
+          "aliases": [
+            "pangolin scales",
+            "Manis species product",
+            "scaly anteater"
+          ],
           "reason": "CITES Appendix I — critically endangered"
         },
         {
           "phrase": "bushmeat wildlife illegal trade",
-          "aliases": ["primate bushmeat", "illegal wild animal meat", "protected species meat"],
-          "action": "review",
+          "aliases": [
+            "primate bushmeat",
+            "illegal wild animal meat",
+            "protected species meat"
+          ],
           "reason": "CITES / health risk — illegal wildlife trade"
         },
         {
           "phrase": "shark fin dried trade",
-          "aliases": ["shark fin soup ingredient", "dried shark cartilage fin", "finning product"],
-          "action": "review",
+          "aliases": [
+            "shark fin soup ingredient",
+            "dried shark cartilage fin",
+            "finning product"
+          ],
           "reason": "CITES Appendix II — regulated shark species"
         },
         {
           "phrase": "whale meat cetacean product",
-          "aliases": ["whale blubber", "minke whale meat", "cetacean marine mammal product"],
-          "action": "review",
+          "aliases": [
+            "whale blubber",
+            "minke whale meat",
+            "cetacean marine mammal product"
+          ],
           "reason": "IWC moratorium — commercial whaling banned"
         }
       ]
     },
     "pharmaceuticals": {
-      "risk_level": "high",
       "hard_negatives": [
         {
           "phrase": "fentanyl synthetic opioid narcotic",
-          "aliases": ["fentanyl citrate injection", "fentanyl transdermal patch", "fentanyl analog carfentanil"],
-          "action": "block",
+          "aliases": [
+            "fentanyl citrate injection",
+            "fentanyl transdermal patch",
+            "fentanyl analog carfentanil"
+          ],
           "reason": "controlled narcotic — DEA Schedule II"
         },
         {
           "phrase": "methamphetamine stimulant drug",
-          "aliases": ["crystal meth amphetamine", "methamphetamine hydrochloride", "desoxyn stimulant"],
-          "action": "block",
+          "aliases": [
+            "crystal meth amphetamine",
+            "methamphetamine hydrochloride",
+            "desoxyn stimulant"
+          ],
           "reason": "controlled narcotic — DEA Schedule II"
         },
         {
           "phrase": "oxycodone opioid painkiller",
-          "aliases": ["OxyContin controlled opioid", "oxycodone hydrochloride tablets"],
-          "action": "review",
+          "aliases": [
+            "OxyContin controlled opioid",
+            "oxycodone hydrochloride tablets"
+          ],
           "reason": "controlled narcotic — DEA Schedule II"
         },
         {
           "phrase": "morphine opioid analgesic",
-          "aliases": ["morphine sulfate injection", "morphine controlled painkiller"],
-          "action": "review",
+          "aliases": [
+            "morphine sulfate injection",
+            "morphine controlled painkiller"
+          ],
           "reason": "controlled narcotic — DEA Schedule II"
         },
         {
           "phrase": "amphetamine stimulant controlled",
-          "aliases": ["dextroamphetamine", "Adderall amphetamine", "amphetamine salt combination"],
-          "action": "review",
+          "aliases": [
+            "dextroamphetamine",
+            "Adderall amphetamine",
+            "amphetamine salt combination"
+          ],
           "reason": "controlled stimulant — DEA Schedule II"
         },
         {
           "phrase": "ketamine anesthetic controlled",
-          "aliases": ["ketamine hydrochloride injection", "special K dissociative anesthetic"],
-          "action": "review",
+          "aliases": [
+            "ketamine hydrochloride injection",
+            "special K dissociative anesthetic"
+          ],
           "reason": "controlled anesthetic — DEA Schedule III"
         },
         {
           "phrase": "benzodiazepine controlled sedative",
-          "aliases": ["diazepam Valium", "alprazolam Xanax", "clonazepam Klonopin", "lorazepam Ativan"],
-          "action": "review",
+          "aliases": [
+            "diazepam Valium",
+            "alprazolam Xanax",
+            "clonazepam Klonopin",
+            "lorazepam Ativan"
+          ],
           "reason": "controlled sedative — DEA Schedule IV"
         },
         {
           "phrase": "tramadol opioid painkiller",
-          "aliases": ["tramadol hydrochloride", "Ultram opioid analgesic"],
-          "action": "review",
+          "aliases": [
+            "tramadol hydrochloride",
+            "Ultram opioid analgesic"
+          ],
           "reason": "controlled opioid — DEA Schedule IV"
         },
         {
           "phrase": "counterfeit pharmaceutical drug",
-          "aliases": ["fake medicine", "substandard drug product", "falsified pharmaceutical"],
-          "action": "block",
+          "aliases": [
+            "fake medicine",
+            "substandard drug product",
+            "falsified pharmaceutical"
+          ],
           "reason": "counterfeit pharmaceuticals — WHO/FDA concern"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "over-the-counter pain reliever OTC medication",
+          "aliases": [
+            "ibuprofen OTC tablets",
+            "paracetamol acetaminophen",
+            "aspirin OTC painkiller",
+            "naproxen OTC"
+          ],
+          "deflects": [
+            "oxycodone opioid painkiller",
+            "morphine opioid analgesic",
+            "tramadol opioid painkiller",
+            "fentanyl synthetic opioid narcotic"
+          ],
+          "reason": "over-the-counter non-controlled analgesic — not a scheduled opioid"
+        },
+        {
+          "phrase": "vitamin dietary supplement nutraceutical",
+          "aliases": [
+            "multivitamin tablets",
+            "vitamin C supplement",
+            "dietary mineral supplement",
+            "herbal supplement product"
+          ],
+          "deflects": [
+            "amphetamine stimulant controlled",
+            "methamphetamine stimulant drug",
+            "counterfeit pharmaceutical drug"
+          ],
+          "reason": "dietary supplement / vitamin — not a controlled substance"
+        },
+        {
+          "phrase": "erectile dysfunction medication prescription",
+          "aliases": [
+            "sildenafil viagra tablets",
+            "tadalafil cialis",
+            "ED medication prescribed"
+          ],
+          "deflects": [
+            "counterfeit pharmaceutical drug",
+            "amphetamine stimulant controlled"
+          ],
+          "reason": "licensed prescription ED medication — not a controlled or counterfeit drug"
+        },
+        {
+          "phrase": "antibiotic prescription medication common",
+          "aliases": [
+            "amoxicillin antibiotic tablets",
+            "azithromycin prescription",
+            "penicillin antibiotic"
+          ],
+          "deflects": [
+            "counterfeit pharmaceutical drug",
+            "fentanyl synthetic opioid narcotic"
+          ],
+          "reason": "common licensed antibiotic — not controlled or counterfeit"
         }
       ]
     },
     "plastics": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "ozone depleting substance CFC",
-          "aliases": ["chlorofluorocarbon refrigerant", "HCFC controlled substance", "CFC-12 Freon banned"],
-          "action": "review",
+          "aliases": [
+            "chlorofluorocarbon refrigerant",
+            "HCFC controlled substance",
+            "CFC-12 Freon banned"
+          ],
           "reason": "ozone depleting substance — Montreal Protocol"
         },
         {
           "phrase": "persistent organic pollutant POP",
-          "aliases": ["PCB polychlorinated biphenyl", "DDT pesticide banned", "Stockholm Convention substance"],
-          "action": "review",
+          "aliases": [
+            "PCB polychlorinated biphenyl",
+            "DDT pesticide banned",
+            "Stockholm Convention substance"
+          ],
           "reason": "persistent organic pollutant — Stockholm Convention"
         }
       ]
     },
     "textiles": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "fur seal marine mammal pelt",
-          "aliases": ["seal skin fur coat", "marine mammal fur trade", "harp seal pelt"],
-          "action": "review",
+          "aliases": [
+            "seal skin fur coat",
+            "marine mammal fur trade",
+            "harp seal pelt"
+          ],
           "reason": "CITES — marine mammal fur trade restricted"
         },
         {
           "phrase": "shahtoosh Tibetan antelope shawl",
-          "aliases": ["chiru wool textile", "shahtoosh ring shawl"],
-          "action": "block",
+          "aliases": [
+            "chiru wool textile",
+            "shahtoosh ring shawl"
+          ],
           "reason": "CITES Appendix I — Tibetan antelope endangered"
         },
         {
           "phrase": "asbestos textile fiber material",
-          "aliases": ["chrysotile asbestos fabric", "asbestos woven textile", "asbestos insulation cloth"],
-          "action": "review",
+          "aliases": [
+            "chrysotile asbestos fabric",
+            "asbestos woven textile",
+            "asbestos insulation cloth"
+          ],
           "reason": "banned substance — Rotterdam Convention / EU REACH"
         },
         {
           "phrase": "forced labor cotton Xinjiang",
-          "aliases": ["Uyghur forced labor product", "XUAR cotton textile", "forced labor manufactured goods"],
-          "action": "review",
+          "aliases": [
+            "Uyghur forced labor product",
+            "XUAR cotton textile",
+            "forced labor manufactured goods"
+          ],
           "reason": "forced labor — UFLPA (Uyghur Forced Labor Prevention Act)"
+        }
+      ],
+      "safe_exceptions": [
+        {
+          "phrase": "ordinary cotton garments apparel",
+          "aliases": [
+            "plain cotton clothing",
+            "standard cotton textiles",
+            "cotton t-shirt apparel",
+            "woven cotton fabric roll"
+          ],
+          "deflects": [
+            "forced labor cotton Xinjiang"
+          ],
+          "reason": "ordinary cotton apparel — no Xinjiang / forced-labor indicators"
+        },
+        {
+          "phrase": "synthetic polyester fabric textile",
+          "aliases": [
+            "polyester woven fabric",
+            "nylon synthetic textile",
+            "rayon viscose fabric"
+          ],
+          "deflects": [
+            "forced labor cotton Xinjiang",
+            "fur seal marine mammal pelt",
+            "shahtoosh Tibetan antelope shawl"
+          ],
+          "reason": "synthetic textile — no animal or forced-labor concerns"
+        },
+        {
+          "phrase": "new apparel garments fashion clothing",
+          "aliases": [
+            "men women clothing new",
+            "fashion apparel new merchandise",
+            "ready-made garments export"
+          ],
+          "deflects": [
+            "forced labor cotton Xinjiang",
+            "shahtoosh Tibetan antelope shawl",
+            "fur seal marine mammal pelt"
+          ],
+          "reason": "new garments — no specific forced-labor or protected-species indicators"
         }
       ]
     },
     "toys": {
-      "risk_level": "low",
       "hard_negatives": [
         {
           "phrase": "real firearm weapon disguised toy",
-          "aliases": ["concealed weapon toy form", "weapon disguised as toy", "functional firearm toy appearance"],
-          "action": "review",
+          "aliases": [
+            "concealed weapon toy form",
+            "weapon disguised as toy",
+            "functional firearm toy appearance"
+          ],
           "reason": "possible misclassified weapon — verify not functional firearm"
         },
         {
           "phrase": "live ammunition real bullets",
-          "aliases": ["functional ammunition rounds", "real cartridge ammunition", "live ordnance"],
-          "action": "block",
+          "aliases": [
+            "functional ammunition rounds",
+            "real cartridge ammunition",
+            "live ordnance"
+          ],
           "reason": "misclassified defense item"
         },
         {
           "phrase": "lead paint toxic children product",
-          "aliases": ["lead-based paint toy", "toxic heavy metal children product", "cadmium children toy"],
-          "action": "review",
+          "aliases": [
+            "lead-based paint toy",
+            "toxic heavy metal children product",
+            "cadmium children toy"
+          ],
           "reason": "banned in children's products — CPSIA / EU Toy Safety Directive"
         },
         {
           "phrase": "explosive pyrotechnic device",
-          "aliases": ["firework explosive consumer", "pyrotechnic charge", "detonator explosive toy"],
-          "action": "review",
+          "aliases": [
+            "firework explosive consumer",
+            "pyrotechnic charge",
+            "detonator explosive toy"
+          ],
           "reason": "possible misclassification — defense/chemicals"
         }
       ]

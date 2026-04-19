@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass, field
 
 # ── Boilerplate removal ───────────────────────────────────────────────────────
 # Each entry is a compiled regex that gets substituted with a single space.
@@ -47,6 +48,21 @@ _BOILERPLATE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\b\d+\s*(?:pallets?|cartons?|boxes|bags|bales|drums|crates?)\b", re.IGNORECASE),
     re.compile(r"\bfcl\b", re.IGNORECASE),
     re.compile(r"\blcl\b", re.IGNORECASE),
+    # VINs (17 chars, alphanumeric, excluding I/O/Q).
+    re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b", re.IGNORECASE),
+    # Invoice / reference / order numbers.
+    re.compile(r"\binvoice\s*(?:no|number|#)?\.?\s*:?\s*[a-z0-9-]+\b", re.IGNORECASE),
+    re.compile(r"\bref(?:erence)?\s*(?:no|#)?\.?\s*:?\s*[a-z0-9-]+\b", re.IGNORECASE),
+    re.compile(r"\border\s*(?:no|#)?\.?\s*:?\s*[a-z0-9-]+\b", re.IGNORECASE),
+    # Phone / fax numbers (tolerate +, spaces, dashes, parens).
+    re.compile(r"\btel(?:ephone)?\.?\s*:?\s*[+\d][\d\s\-()]{7,}\b", re.IGNORECASE),
+    re.compile(r"\bfax\.?\s*:?\s*[+\d][\d\s\-()]{7,}\b", re.IGNORECASE),
+    # "Cargo 1:" / "Cargo 2:" concatenation prefixes from manifest joins.
+    re.compile(r"\bcargo\s*\d+\s*:\s*", re.IGNORECASE),
+    # ISO 6346 container numbers (4 letters + 7 digits).
+    re.compile(r"\b[A-Z]{4}\d{7}\b", re.IGNORECASE),
+    # Bill of lading numbers.
+    re.compile(r"\bb\s*/?\s*l\s*(?:no)?\.?\s*:?\s*[a-z0-9-]+\b", re.IGNORECASE),
 ]
 
 # ── Abbreviation expansion ────────────────────────────────────────────────────
@@ -212,6 +228,66 @@ def normalize(text: str) -> str:
     s = _dedupe_consecutive(s)
 
     return s
+
+
+# ── Structured-signal extraction ──────────────────────────────────────────────
+# Run BEFORE normalize() so the boilerplate strip doesn't destroy the signal.
+# HS/HTS codes are 6- or 10-digit commodity codes; we accept 2–10 digits and
+# downstream callers trim to the 2-digit chapter for category lookup.
+
+# Locate a "HS code: ..." style anchor; used to identify the starting offset.
+_HS_ANCHOR_RE = re.compile(
+    r"\b(?:hs|hts|tariff)\s*(?:code|codes|no|number|#)?\.?\s*:?\s*",
+    re.IGNORECASE,
+)
+# Digit runs that look like HS/HTS codes: 6, 8, or 10 digits (WCO HS-6, US
+# HTS-8/10). 4-digit subheadings are too short to disambiguate from phone /
+# invoice fragments; we start at 6 and require the anchor to be nearby.
+_HS_DIGITS_RE = re.compile(r"\b(\d{6}|\d{8}|\d{10})\b")
+
+
+@dataclass
+class ExtractedSignals:
+    """Structured signals pulled from raw text before normalization.
+
+    ``hs_codes`` are raw digits (e.g. "30049090"). Callers derive the 2-digit
+    chapter with ``code[:2]`` for HS→category lookup.
+    """
+    hs_codes: list[str] = field(default_factory=list)
+
+
+def extract_signals(text: str) -> ExtractedSignals:
+    """Pull HS/HTS codes out of raw text.
+
+    Must run BEFORE ``normalize()`` — the boilerplate regex strips `hs code: 123`
+    patterns to a single space, destroying the signal.
+
+    Idempotent: extracting twice returns the same set of codes.
+    """
+    if not text:
+        return ExtractedSignals()
+
+    # Unicode-normalize so fullwidth digits (if any) become ASCII before regex.
+    s = unicodedata.normalize("NFKC", text)
+
+    codes: list[str] = []
+    seen: set[str] = set()
+
+    # Walk each HS/HTS/tariff anchor and grab digit runs that follow within a
+    # generous window (handles "HS Code: 090961, 090619, and 090620").
+    for anchor in _HS_ANCHOR_RE.finditer(s):
+        window = s[anchor.end(): anchor.end() + 200]
+        # Stop the window at sentence punctuation that would separate sections.
+        split = re.search(r"[.;\n]", window)
+        if split:
+            window = window[: split.start()]
+        for m in _HS_DIGITS_RE.finditer(window):
+            code = m.group(1)
+            if code not in seen:
+                seen.add(code)
+                codes.append(code)
+
+    return ExtractedSignals(hs_codes=codes)
 
 
 def build_query_text(cargo: str, commodity: str) -> str:

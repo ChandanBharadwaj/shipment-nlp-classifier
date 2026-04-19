@@ -41,12 +41,20 @@ from classifier import (
     MODEL_NAME,
     UNCLASSIFIED_THRESHOLD_DEFAULT,
     embed_texts,
+    get_metrics,
     load_category_config,
     load_centroids,
     load_chapter_titles,
+    load_chapter_to_category,
+    load_cross_encoder,
     load_keywords,
     predict,
     predict_batch,
+)
+from config import (
+    MARGIN_DELTA_DEFAULT,
+    RERANKER_ENABLED as CONFIG_RERANKER_ENABLED,
+    RERANKER_MODEL  as CONFIG_RERANKER_MODEL,
 )
 from compliance import apply_compliance, load_risk_profile, prepare_risk_vectors
 from db import close_pool, pooled_connection
@@ -54,11 +62,31 @@ from db import close_pool, pooled_connection
 # ── App setup ──────────────────────────────────────────────────────────────────
 
 # In-memory state refreshed on /reload
-centroids:       dict = {}
-keywords:        dict = {}
-category_config: dict = {}
-chapter_titles:  dict = {}
-risk_vectors:    dict = {}
+centroids:             dict = {}
+keywords:              dict = {}
+category_config:       dict = {}
+chapter_titles:        dict = {}
+chapter_to_category:   dict = {}
+category_descriptions: dict = {}
+risk_vectors:          dict = {}
+
+# Phase 3: cross-encoder reranker is opt-in. Default off → zero runtime cost
+# and no model download at startup. Flip RERANKER_ENABLED=true to enable.
+# Read from config.py (single source of truth for tunables).
+RERANKER_ENABLED = CONFIG_RERANKER_ENABLED
+RERANKER_MODEL   = CONFIG_RERANKER_MODEL
+
+
+def _build_category_descriptions(keywords: dict[str, list[tuple[str, float]]]) -> dict[str, str]:
+    """One short sentence per category, built from its top-weighted keywords.
+    Used as the cross-encoder's class-side text. Rebuilt on /reload so prunes
+    propagate to the reranker's view of each category.
+    """
+    out: dict[str, str] = {}
+    for cat, kws in keywords.items():
+        top = [kw for kw, _ in sorted(kws, key=lambda x: -x[1])[:10]]
+        out[cat] = f"category: {cat} — commonly includes: " + ", ".join(top)
+    return out
 
 
 def _load_risk() -> dict:
@@ -69,6 +97,7 @@ def _load_risk() -> dict:
     print(
         f"Risk profile: {stats.get('global_entries', 0)} global blocked, "
         f"{stats.get('category_entries', 0)} category hard negatives, "
+        f"{stats.get('safe_exception_entries', 0)} safe exceptions, "
         f"{stats.get('total_vectors', 0)} total vectors embedded"
     )
     return vectors
@@ -78,13 +107,19 @@ def _load_risk() -> dict:
 async def lifespan(app: FastAPI):
     """FastAPI lifespan: load DB-backed state + risk vectors on startup,
     close the connection pool on shutdown."""
-    global centroids, keywords, category_config, chapter_titles, risk_vectors
+    global centroids, keywords, category_config, chapter_titles, chapter_to_category
+    global category_descriptions, risk_vectors
     with pooled_connection() as conn:
-        centroids       = load_centroids(conn)
-        keywords        = load_keywords(conn)
-        category_config = load_category_config(conn)
-        chapter_titles  = load_chapter_titles(conn)
+        centroids           = load_centroids(conn)
+        keywords            = load_keywords(conn)
+        category_config     = load_category_config(conn)
+        chapter_titles      = load_chapter_titles(conn)
+        chapter_to_category = load_chapter_to_category(conn)
+    category_descriptions = _build_category_descriptions(keywords)
     risk_vectors = _load_risk()
+    if RERANKER_ENABLED:
+        load_cross_encoder(RERANKER_MODEL)
+        print(f"Cross-encoder reranker enabled: {RERANKER_MODEL}")
     print(
         f"Loaded {len(centroids)} category centroids "
         f"(chapter centroids total: {sum(len(v) for v in centroids.values())}), "
@@ -230,13 +265,26 @@ def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None 
             # model's context window and were chunked. Surfaced for caller
             # observability — long-tail risk catches show chunks_processed > 1.
             "chunks_processed": result.get("chunks_processed", 1),
+            # True when Phase 3 cross-encoder actually ran on this row (only
+            # fires in `classified` state with 2+ candidates).
+            "reranked": bool(result.get("reranked")),
         },
     }
 
     if result.get("reason"):
         response["result"]["reason"] = result["reason"]
-    if result.get("quality"):
-        response["result"]["quality"] = result["quality"]
+    # Unified field name — classifier emits ``text_quality`` on every path now.
+    # Fall back to the legacy ``quality`` key for any caller that pre-dates the rename.
+    tq = result.get("text_quality") or result.get("quality")
+    if tq:
+        response["result"]["text_quality"] = tq
+
+    # HS-code audit signal (structured, extracted before normalization). Surfaced
+    # on every row — the UI compares it to `categories` to highlight mismatches.
+    # Purely informational; does NOT influence `is_risky` or classifier scoring.
+    response["result"]["hs_codes_extracted"]    = result.get("hs_codes_extracted") or []
+    response["result"]["hs_implied_categories"] = result.get("hs_implied_categories") or []
+    response["result"]["hs_text_mismatch"]      = bool(result.get("hs_text_mismatch"))
 
     # Compliance decision (semantic risk profile)
     if compliance:
@@ -246,6 +294,21 @@ def _build_response(req: ClassifyRequest, result: dict, compliance: dict | None 
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.get("/metrics")
+def metrics() -> dict:
+    """In-process counters for observability (single-worker semantics).
+
+    Useful during tuning: ``margin_suppressions_total`` climbs when the
+    top-margin rule is doing work; ``rerank_fires_total`` / ``rerank_drops_total``
+    tell you whether the reranker is adding value. Reset by restart or
+    by hitting /reload (which also rebuilds category_descriptions).
+    """
+    m = get_metrics()
+    m["margin_delta"]     = MARGIN_DELTA_DEFAULT
+    m["reranker_enabled"] = RERANKER_ENABLED
+    return m
+
 
 @app.get("/health")
 def health() -> dict:
@@ -260,21 +323,8 @@ def health() -> dict:
             c.get("platt_a") is not None for c in category_config.values()
         ),
         "risk_vectors":       stats.get("total_vectors", 0),
-    }
-
-
-@app.get("/risk-levels")
-def risk_levels() -> dict:
-    """Return {category: risk_level} for the UI's risk-tag rendering.
-
-    Reads from the in-memory risk_vectors loaded at startup so the response
-    auto-refreshes after POST /reload. Categories without an explicit
-    risk_level fall back to "low".
-    """
-    cats = risk_vectors.get("categories", {}) or {}
-    return {
-        cat: (conf.get("risk_level") or "low")
-        for cat, conf in cats.items()
+        "reranker_enabled":   RERANKER_ENABLED,
+        "reranker_model":     RERANKER_MODEL if RERANKER_ENABLED else None,
     }
 
 
@@ -289,6 +339,8 @@ def classify(req: ClassifyRequest) -> dict:
         threshold=req.threshold,
         unclassified_threshold=req.unclassified_threshold,
         chapter_titles=chapter_titles,
+        chapter_to_category=chapter_to_category,
+        category_descriptions=category_descriptions if RERANKER_ENABLED else None,
     )
 
     # Semantic compliance decision (uses the shipment embedding)
@@ -329,6 +381,8 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
         thresholds=thrs,
         unclassified_thresholds=unc_thrs,
         chapter_titles=chapter_titles,
+        chapter_to_category=chapter_to_category,
+        category_descriptions=category_descriptions if RERANKER_ENABLED else None,
     )
 
     # Semantic compliance decisions (reuses each shipment's embedding)
@@ -362,13 +416,16 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
 
 @app.post("/reload")
 def reload() -> dict:
-    """Reload centroids, keywords, chapter titles, per-category config, and risk vectors."""
-    global centroids, keywords, category_config, chapter_titles, risk_vectors
+    """Reload centroids, keywords, chapter titles, HS→category map, per-category config, and risk vectors."""
+    global centroids, keywords, category_config, chapter_titles, chapter_to_category
+    global category_descriptions, risk_vectors
     with pooled_connection() as conn:
-        centroids       = load_centroids(conn)
-        keywords        = load_keywords(conn)
-        category_config = load_category_config(conn)
-        chapter_titles  = load_chapter_titles(conn)
+        centroids           = load_centroids(conn)
+        keywords            = load_keywords(conn)
+        category_config     = load_category_config(conn)
+        chapter_titles      = load_chapter_titles(conn)
+        chapter_to_category = load_chapter_to_category(conn)
+    category_descriptions = _build_category_descriptions(keywords)
     risk_vectors = _load_risk()
     stats = risk_vectors.get("_stats", {})
     return {
@@ -380,8 +437,9 @@ def reload() -> dict:
             c.get("platt_a") is not None for c in category_config.values()
         ),
         "risk_profile": {
-            "global_entries":    stats.get("global_entries", 0),
-            "category_entries":  stats.get("category_entries", 0),
-            "total_vectors":     stats.get("total_vectors", 0),
+            "global_entries":         stats.get("global_entries", 0),
+            "category_entries":       stats.get("category_entries", 0),
+            "safe_exception_entries": stats.get("safe_exception_entries", 0),
+            "total_vectors":          stats.get("total_vectors", 0),
         },
     }

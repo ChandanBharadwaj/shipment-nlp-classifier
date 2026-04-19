@@ -1,10 +1,12 @@
 /* Shipment Classifier — CSV tester
  *
  * Stateless single-page app. Lifecycle:
- *   1. On load, fetch /risk-levels once (for HIGH/MED/LOW tags on chips).
- *   2. User drops a CSV → PapaParse → validate headers → POST /classify/batch
+ *   1. User drops a CSV → PapaParse → validate headers → POST /classify/batch
  *      with persist:false on every row.
- *   3. Render results into a table. No localStorage / sessionStorage / cookies.
+ *   2. Render results into a table. No localStorage / sessionStorage / cookies.
+ *
+ * Risk is reported per-shipment via `compliance.is_risky` (true/false).
+ * No block/review tiers and no per-category risk tiers.
  */
 
 (() => {
@@ -58,14 +60,7 @@
   const summary    = $("#summary");
   const tbody      = $("#resultsBody");
 
-  let riskLevels = {};   // {category: "high"|"medium"|"low"}
-
   // ── Boot ──────────────────────────────────────────────────────────────────
-
-  fetch("/risk-levels")
-    .then((r) => (r.ok ? r.json() : {}))
-    .then((data) => { riskLevels = data || {}; })
-    .catch(() => { /* tags fall back to LOW */ });
 
   pickBtn.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", (e) => {
@@ -200,6 +195,8 @@
     let lowConfCount      = 0;
     let unclassifiedCount = 0;
     let riskyCount        = 0;
+    let mismatchCount     = 0;
+    let rerankedCount     = 0;
 
     for (const row of rows) {
       const tr = document.createElement("tr");
@@ -212,6 +209,9 @@
       const scores     = result.scores || {};
       const isRisky    = compl.is_risky === true;
       const reasons    = compl.decision_reasons || [];
+      const hsCodes    = result.hs_codes_extracted || [];
+      const hsImplied  = result.hs_implied_categories || [];
+      const hsMismatch = result.hs_text_mismatch === true;
 
       if (conf === "classified")     classifiedCount++;
       else if (conf === "low_confidence") lowConfCount++;
@@ -220,11 +220,17 @@
         riskyCount++;
         tr.classList.add("risky-row");
       }
+      if (hsMismatch) {
+        mismatchCount++;
+        tr.classList.add("hs-mismatch-row");
+      }
+      if (meta.reranked === true) rerankedCount++;
 
       tr.appendChild(td("cell-id",     row.shipment_id || ""));
       tr.appendChild(td("cell-text",   truncCell(input.cargo_description)));
       tr.appendChild(td("cell-text",   truncCell(input.commodity_description)));
       tr.appendChild(labelsCell(matched, scores, conf));
+      tr.appendChild(hsSignalCell(hsCodes, hsImplied, hsMismatch));
       tr.appendChild(confidenceCell(conf));
       tr.appendChild(complianceCell(isRisky, reasons));
       tr.appendChild(td("cell-chunks", meta.chunks_processed && meta.chunks_processed > 1
@@ -236,7 +242,8 @@
     summary.textContent =
       `${rows.length} shipment${rows.length === 1 ? "" : "s"} in ${elapsed}s — ` +
       `${classifiedCount} classified, ${lowConfCount} low_confidence, ${unclassifiedCount} unclassified · ` +
-      `${riskyCount} flagged risky`;
+      `${riskyCount} flagged risky · ${mismatchCount} HS\u2194text mismatch${mismatchCount === 1 ? "" : "es"}` +
+      (rerankedCount > 0 ? ` · ${rerankedCount} reranked` : "");
     results.classList.remove("hidden");
   }
 
@@ -287,6 +294,46 @@
     return cell;
   }
 
+  function hsSignalCell(codes, implied, mismatch) {
+    const cell = document.createElement("td");
+    cell.className = "cell-hs";
+
+    if (!codes || !codes.length) {
+      const dash = document.createElement("span");
+      dash.className = "hs-none";
+      dash.textContent = "\u2014";
+      cell.appendChild(dash);
+      return cell;
+    }
+
+    for (const code of codes) {
+      const chip = document.createElement("span");
+      chip.className = "chip hs-code";
+      chip.textContent = code;
+      cell.appendChild(chip);
+    }
+
+    if (implied && implied.length) {
+      const arrow = document.createElement("span");
+      arrow.className = "hs-arrow";
+      arrow.textContent = "\u2192";
+      cell.appendChild(arrow);
+      for (const cat of implied) {
+        cell.appendChild(categoryChip(cat, null));
+      }
+    }
+
+    if (mismatch) {
+      cell.classList.add("mismatch");
+      const badge = document.createElement("span");
+      badge.className = "badge mismatch";
+      badge.textContent = "HS \u2260 text";
+      cell.appendChild(badge);
+    }
+
+    return cell;
+  }
+
   function categoryChip(cat, scoreObj) {
     const chip = document.createElement("span");
     chip.className = "chip";
@@ -297,20 +344,6 @@
     const name = document.createElement("span");
     name.textContent = cat;
     chip.appendChild(name);
-
-    const tag = document.createElement("span");
-    const level = (riskLevels[cat] || "low").toLowerCase();
-    if (level === "high") {
-      tag.className = "tag tag-high";
-      tag.textContent = "HIGH RISK";
-    } else if (level === "medium" || level === "med") {
-      tag.className = "tag tag-med";
-      tag.textContent = "MED RISK";
-    } else {
-      tag.className = "tag tag-low";
-      tag.textContent = "LOW RISK";
-    }
-    chip.appendChild(tag);
 
     if (scoreObj && typeof scoreObj.final_score === "number") {
       chip.title = `final_score=${scoreObj.final_score.toFixed(3)}`;

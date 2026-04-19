@@ -2,10 +2,9 @@
 Semantic compliance decision layer.
 
 Uses the same sentence-transformer embeddings as the classifier to match
-shipments against hard-negative risk phrases. Instead of brittle keyword regex,
-each risk phrase (+ aliases) is embedded at startup. At inference, the
-*already-computed* shipment embedding is compared against risk vectors via
-cosine similarity.
+shipments against risk phrases. Instead of brittle keyword regex, each risk
+phrase (+ aliases) is embedded at startup. At inference, the *already-computed*
+shipment embedding is compared against risk vectors via cosine similarity.
 
 This means:
   - "depleted uranium fuel rods" catches "spent nuclear fuel", "DU penetrator"
@@ -17,30 +16,18 @@ embedding so the two distributions stay aligned. The original phrase text is
 preserved for audit output.
 
 Schema (risk_profile.json):
-  - default_thresholds: {block: float, review: float}
+  - default_thresholds: {risky: float}
   - global_blocked: list of {phrase, aliases?, risky: true, reason}
-        Every global entry is unconditionally treated as risky on match.
-  - categories: dict of {risk_level, hard_negatives: list of {phrase, aliases?, action, reason}}
-        Category entries use action ∈ {"block", "review"} which both feed into
-        the single ``is_risky`` boolean returned to callers; the action is
-        retained internally so audit reasons can describe severity.
+  - categories: dict of {hard_negatives, safe_exceptions?}
+        hard_negatives   — list of {phrase, aliases?, reason}
+        safe_exceptions  — list of {phrase, aliases?, deflects: [phrase,...], reason}
+          When a safe_exception hits with higher cosine similarity than the
+          hard_negatives listed in ``deflects``, those hits are suppressed.
 
-Decision cascade (evaluated top-to-bottom, first match wins):
-    1. Global blocked phrase hit (cosine >= block_threshold) -> risky
-    2. Category hard-negative hit (action=block, cosine >= review_threshold) -> risky
-    3. Category hard-negative hit (action=review, cosine >= review_threshold) -> risky
-    4. risk_level=high (any confidence) -> risky
-    5. confidence_state=unclassified or low_confidence -> risky
-    6. risk_level=medium or low + classified -> not risky
-
-Usage::
-
-    from compliance import load_risk_profile, prepare_risk_vectors, apply_compliance
-
-    profile = load_risk_profile()
-    risk_vectors = prepare_risk_vectors(profile, embed_fn)
-    decision = apply_compliance(classifier_result, risk_vectors)
-    # decision["is_risky"] -> bool
+Decision rule — one bit, phrase matches only:
+    Any global_blocked or category hard_negative hit (cosine ≥ risky_threshold)
+    that is not deflected by a safe_exception  ->  is_risky = True
+    Otherwise                                   ->  is_risky = False
 """
 
 from __future__ import annotations
@@ -53,21 +40,17 @@ import numpy as np
 
 from preprocess import normalize as _normalize_text
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
 _DEFAULT_PROFILE_PATH = Path(__file__).parent / "risk_profile.json"
 
-# Single source of truth for cascade thresholds. Overridable via
-# default_thresholds in risk_profile.json.
-_DEFAULT_THRESHOLDS = {"block": 0.62, "review": 0.55}
+# Single cosine threshold for "is this shipment risky?". Overridable via
+# default_thresholds.risky in risk_profile.json.
+_DEFAULT_THRESHOLDS = {"risky": 0.55}
 
-# Sentinel category name used for global_blocked hits.
 _GLOBAL_SCOPE = "_global"
 
-# Schema validation
-_REQUIRED_GLOBAL_KEYS = {"phrase", "reason", "risky"}
-_REQUIRED_CATEGORY_KEYS = {"phrase", "action", "reason"}
-_VALID_CATEGORY_ACTIONS = {"block", "review"}
+_REQUIRED_GLOBAL_KEYS         = {"phrase", "reason", "risky"}
+_REQUIRED_CATEGORY_KEYS       = {"phrase", "reason"}
+_REQUIRED_SAFE_EXCEPTION_KEYS = {"phrase", "deflects", "reason"}
 
 
 # ── Profile loading ───────────────────────────────────────────────────────────
@@ -84,7 +67,6 @@ def load_risk_profile(path: str | Path | None = None) -> dict:
 # ── Validation ────────────────────────────────────────────────────────────────
 
 def _validate_global(entries: list[dict]) -> None:
-    """Fail fast on malformed global_blocked entries."""
     for entry in entries:
         missing = _REQUIRED_GLOBAL_KEYS - entry.keys()
         if missing:
@@ -99,19 +81,28 @@ def _validate_global(entries: list[dict]) -> None:
 
 
 def _validate_category(category: str, entries: list[dict]) -> None:
-    """Fail fast on malformed category hard_negative entries."""
     for entry in entries:
         missing = _REQUIRED_CATEGORY_KEYS - entry.keys()
         if missing:
             raise ValueError(
-                f"Category '{category}' risk entry missing keys "
+                f"Category '{category}' hard_negative missing keys "
                 f"{sorted(missing)}: {entry.get('phrase', '<no phrase>')}"
             )
-        if entry["action"] not in _VALID_CATEGORY_ACTIONS:
+
+
+def _validate_safe_exceptions(category: str, entries: list[dict]) -> None:
+    for entry in entries:
+        missing = _REQUIRED_SAFE_EXCEPTION_KEYS - entry.keys()
+        if missing:
             raise ValueError(
-                f"Category '{category}' entry '{entry['phrase']}' has "
-                f"invalid action '{entry['action']}'; expected one of "
-                f"{sorted(_VALID_CATEGORY_ACTIONS)}"
+                f"Category '{category}' safe_exception missing keys "
+                f"{sorted(missing)}: {entry.get('phrase', '<no phrase>')}"
+            )
+        deflects = entry["deflects"]
+        if not isinstance(deflects, list) or not deflects:
+            raise ValueError(
+                f"Category '{category}' safe_exception '{entry['phrase']}' "
+                f"must have a non-empty 'deflects' list"
             )
 
 
@@ -121,23 +112,9 @@ def _embed_entries(
     entries: list[dict],
     embed_fn: Callable[[list[str]], np.ndarray],
 ) -> tuple[list[dict], int]:
-    """
-    Embed each entry's phrase + aliases into vectors.
-
-    Phrases are passed through ``preprocess.normalize`` before embedding so the
-    risk distribution matches the shipment-text distribution at inference time.
-    Original (un-normalized) text is preserved on the entry under
-    ``_display_texts`` for audit output.
-
-    Empty post-normalization variants are dropped (they would be near-duplicates
-    of every other text in embedding space and produce false positives).
-
-    Returns ``(enriched_entries, total_vector_count)``. Phrase + aliases for
-    every entry are batched into a single embed call.
-    """
     all_texts: list[str] = []
-    entry_spans: list[tuple[int, int]] = []   # (start_idx, count) per entry
-    entry_displays: list[list[str]] = []      # original text aligned with _vectors
+    entry_spans: list[tuple[int, int]] = []
+    entry_displays: list[list[str]] = []
 
     for entry in entries:
         originals = [entry["phrase"]] + entry.get("aliases", [])
@@ -157,13 +134,13 @@ def _embed_entries(
     if not all_texts:
         return entries, 0
 
-    all_vectors = embed_fn(all_texts)  # (N, dim), L2-normalized
+    all_vectors = embed_fn(all_texts)
 
     enriched: list[dict] = []
     n_vectors = 0
     for i, entry in enumerate(entries):
         start, count = entry_spans[i]
-        vectors = all_vectors[start : start + count]  # (count, dim)
+        vectors = all_vectors[start : start + count]
         enriched.append({
             **entry,
             "_vectors": vectors,
@@ -178,36 +155,42 @@ def prepare_risk_vectors(
     profile: dict,
     embed_fn: Callable[[list[str]], np.ndarray],
 ) -> dict:
-    """
-    Embed all risk phrases and return an enriched profile with numpy vectors.
-
-    Validates the schema before embedding so typos fail at startup, not at
-    request time.
-    """
+    """Embed all risk phrases and return an enriched profile with numpy vectors."""
     global_raw = profile.get("global_blocked", [])
     _validate_global(global_raw)
     global_entries, n_global_vectors = _embed_entries(global_raw, embed_fn)
 
     categories: dict[str, dict] = {}
     n_cat_vectors = 0
+    n_safe_vectors = 0
     for cat_name, cat_cfg in profile.get("categories", {}).items():
         negs = cat_cfg.get("hard_negatives", [])
         _validate_category(cat_name, negs)
-        enriched, n_v = _embed_entries(negs, embed_fn)
-        categories[cat_name] = {
-            "risk_level": cat_cfg.get("risk_level", "medium"),
-            "hard_negatives": enriched,
-        }
+        enriched_negs, n_v = _embed_entries(negs, embed_fn)
         n_cat_vectors += n_v
 
+        safe_raw = cat_cfg.get("safe_exceptions", [])
+        _validate_safe_exceptions(cat_name, safe_raw)
+        enriched_safe, n_s = _embed_entries(safe_raw, embed_fn)
+        n_safe_vectors += n_s
+
+        categories[cat_name] = {
+            "hard_negatives":  enriched_negs,
+            "safe_exceptions": enriched_safe,
+        }
+
+    thresholds = dict(_DEFAULT_THRESHOLDS)
+    thresholds.update(profile.get("default_thresholds", {}))
+
     return {
-        "default_thresholds": profile.get("default_thresholds", _DEFAULT_THRESHOLDS),
-        "global_blocked": global_entries,
-        "categories": categories,
+        "default_thresholds": thresholds,
+        "global_blocked":     global_entries,
+        "categories":         categories,
         "_stats": {
-            "global_entries":   len(global_entries),
-            "category_entries": sum(len(c["hard_negatives"]) for c in categories.values()),
-            "total_vectors":    n_global_vectors + n_cat_vectors,
+            "global_entries":         len(global_entries),
+            "category_entries":       sum(len(c["hard_negatives"]) for c in categories.values()),
+            "safe_exception_entries": sum(len(c["safe_exceptions"]) for c in categories.values()),
+            "total_vectors":          n_global_vectors + n_cat_vectors + n_safe_vectors,
         },
     }
 
@@ -219,20 +202,8 @@ def _match_entries(
     entries: list[dict],
     threshold: float,
     category: str,
-    force_action: str | None = None,
 ) -> list[dict]:
-    """
-    Compare a shipment embedding (or multi-chunk matrix) against risk entries.
-
-    ``embedding`` may be a single ``(dim,)`` vector (single-chunk / legacy
-    caller) or a ``(n_chunks, dim)`` matrix (multi-chunk). Either way we
-    compute max cosine across both the entry's phrase+alias vectors AND the
-    chunk axis, so a risk phrase that only appears in chunk 7 still surfaces.
-
-    Returns hits exceeding ``threshold``. Each hit records the originating
-    ``chunk_idx`` for audit; for single-vector callers, chunk_idx is 0.
-    """
-    # Normalize to a 2-D matrix of shape (n_chunks, dim).
+    """Return all entries with max cosine similarity >= threshold."""
     M = np.atleast_2d(embedding)  # (n_chunks, dim)
 
     hits = []
@@ -241,14 +212,11 @@ def _match_entries(
         if vectors is None or len(vectors) == 0:
             continue
 
-        # Cosine similarities across (phrase x chunk). Both sides L2-normalized.
-        sims = vectors @ M.T                    # (k, n_chunks)
+        sims = vectors @ M.T
         max_sim = float(sims.max())
 
         if max_sim >= threshold:
             ph_idx, ch_idx = np.unravel_index(int(sims.argmax()), sims.shape)
-            # Prefer the display-text list aligned with _vectors. Fall back to
-            # phrase+aliases for entries that pre-date the display-text field.
             display_texts = entry.get("_display_texts") or (
                 [entry["phrase"]] + entry.get("aliases", [])
             )
@@ -256,27 +224,69 @@ def _match_entries(
                 display_texts[ph_idx] if ph_idx < len(display_texts)
                 else entry["phrase"]
             )
-            hits.append({
+            hit = {
                 "phrase":       entry["phrase"],
                 "matched_text": matched,
                 "similarity":   round(max_sim, 4),
                 "category":     category,
-                "action":       force_action or entry["action"],
                 "reason":       entry["reason"],
                 "chunk_idx":    int(ch_idx),
-            })
+            }
+            if "deflects" in entry:
+                hit["deflects"] = list(entry["deflects"])
+            hits.append(hit)
 
     return hits
 
 
+def _apply_safe_exceptions(
+    hard_hits: list[dict],
+    safe_hits: list[dict],
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Drop hard_negative hits that are deflected by a higher-similarity safe_exception."""
+    if not safe_hits or not hard_hits:
+        return hard_hits, [], []
+
+    best_deflect: dict[str, tuple[float, dict]] = {}
+    for s in safe_hits:
+        s_sim = s["similarity"]
+        for phrase in s.get("deflects", []):
+            prev = best_deflect.get(phrase)
+            if prev is None or s_sim > prev[0]:
+                best_deflect[phrase] = (s_sim, s)
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    reasons: list[str] = []
+    for h in hard_hits:
+        deflect = best_deflect.get(h["phrase"])
+        if deflect is not None and deflect[0] >= h["similarity"]:
+            s_sim, s = deflect
+            drop = dict(h)
+            drop["deflected_by"] = s["phrase"]
+            drop["deflected_by_similarity"] = s_sim
+            dropped.append(drop)
+            reasons.append(
+                f"deflected '{h['phrase']}' (sim={h['similarity']:.3f}) "
+                f"by safe_exception '{s['phrase']}' (sim={s_sim:.3f})"
+            )
+        else:
+            kept.append(h)
+
+    return kept, dropped, reasons
+
+
 def _sample_risk_vector(risk_vectors: dict) -> np.ndarray | None:
-    """Return the first available risk vector matrix, or None if empty."""
     for entry in risk_vectors.get("global_blocked", []):
         v = entry.get("_vectors")
         if v is not None and len(v) > 0:
             return v
     for cat in risk_vectors.get("categories", {}).values():
         for entry in cat.get("hard_negatives", []):
+            v = entry.get("_vectors")
+            if v is not None and len(v) > 0:
+                return v
+        for entry in cat.get("safe_exceptions", []):
             v = entry.get("_vectors")
             if v is not None and len(v) > 0:
                 return v
@@ -289,193 +299,99 @@ def apply_compliance(classifier_result: dict, risk_vectors: dict) -> dict:
     """
     Produce a compliance decision from classifier output + pre-computed risk vectors.
 
-    Parameters
-    ----------
-    classifier_result : dict
-        Output of ``classifier.predict()`` — must have ``categories``,
-        ``confidence_state``, ``scores``, and (when available) ``embedding``.
-    risk_vectors : dict
-        Output of ``prepare_risk_vectors()`` — profile enriched with numpy vectors.
-
     Returns
     -------
     dict with keys:
-        is_risky           : bool   -- True if any risk signal triggered
-                                       (semantic match, high-risk category,
-                                       low confidence, or unclassified)
-        decision_reasons   : list[str]
-        hard_negative_hits : list[dict]
-        risk_levels        : dict[str, str]
-
-    Notes
-    -----
-    If ``classifier_result`` contains ``chunk_embeddings`` (a 2-D matrix of
-    per-chunk vectors), every chunk is screened against every risk vector and
-    the best chunk wins per phrase. Hits carry a ``chunk_idx`` for audit and
-    are deduplicated by ``(phrase, category)`` keeping the highest similarity.
-    Without ``chunk_embeddings``, the function falls back to ``embedding`` —
-    backward compatible with all pre-chunking callers and tests.
+        is_risky            : bool  — True if any non-deflected phrase hit
+        hard_negative_hits  : list[dict]  — surviving hits that drove is_risky
+        deflected_hits      : list[dict]  — safe-exception-suppressed hits (audit)
+        decision_reasons    : list[str]
     """
-    # Prefer multi-chunk matrix when present; else single-vector fallback.
     chunk_matrix = classifier_result.get("chunk_embeddings")
     embedding    = chunk_matrix if chunk_matrix is not None else classifier_result.get("embedding")
     categories   = classifier_result.get("categories", [])
-    conf_state   = classifier_result.get("confidence_state", "unclassified")
     cat_profiles = risk_vectors.get("categories", {})
     thresholds   = risk_vectors.get("default_thresholds", _DEFAULT_THRESHOLDS)
 
     reasons: list[str] = []
     all_hits: list[dict] = []
-    risk_levels: dict[str, str] = {
-        c: cat_profiles.get(c, {}).get("risk_level", "medium")
-        for c in categories
-    }
+    deflected_hits: list[dict] = []
 
-    # ── Defensive: dim mismatch (model swapped without /reload) ───────────
+    risky_threshold = thresholds.get("risky", _DEFAULT_THRESHOLDS["risky"])
+
+    def _build() -> dict:
+        return {
+            "is_risky":           bool(all_hits),
+            "hard_negative_hits": all_hits,
+            "deflected_hits":     deflected_hits,
+            "decision_reasons":   reasons,
+        }
+
+    # Defensive: dim mismatch (model swapped without /reload)
     if embedding is not None:
         sample = _sample_risk_vector(risk_vectors)
         if sample is not None:
-            # .shape[-1] is the embedding dim for both 1-D and 2-D inputs.
             emb_dim = np.asarray(embedding).shape[-1]
             if sample.shape[1] != emb_dim:
-                return {
-                    "is_risky": True,
-                    "decision_reasons": [
-                        f"embedding dim {emb_dim} != risk vector dim "
-                        f"{sample.shape[1]}; semantic check skipped"
-                    ],
-                    "hard_negative_hits": [],
-                    "risk_levels": risk_levels,
-                }
+                reasons.append(
+                    f"embedding dim {emb_dim} != risk vector dim "
+                    f"{sample.shape[1]}; semantic check skipped"
+                )
+                return _build()
 
-    # ── No embedding (quality gate rejected) ──────────────────────────────
     if embedding is None:
-        if conf_state in ("low_confidence", "unclassified"):
-            reasons.append(f"confidence_state={conf_state}")
-            return {
-                "is_risky": True,
-                "decision_reasons": reasons,
-                "hard_negative_hits": [],
-                "risk_levels": risk_levels,
-            }
-        high_risk = [c for c, rl in risk_levels.items() if rl == "high"]
-        if high_risk:
-            reasons.append(f"high-risk category: {', '.join(sorted(high_risk))}")
-            return {
-                "is_risky": True,
-                "decision_reasons": reasons,
-                "hard_negative_hits": [],
-                "risk_levels": risk_levels,
-            }
-        reasons.append("classified (no embedding for semantic check)")
-        return {
-            "is_risky": False,
-            "decision_reasons": reasons,
-            "hard_negative_hits": [],
-            "risk_levels": risk_levels,
-        }
+        reasons.append("no embedding available for semantic check")
+        return _build()
 
-    # ── Step 1: Global blocked phrases (always block on match) ────────────
-    block_threshold  = thresholds.get("block",  _DEFAULT_THRESHOLDS["block"])
-    review_threshold = thresholds.get("review", _DEFAULT_THRESHOLDS["review"])
-
+    # Global blocked phrases
     global_hits = _match_entries(
         embedding,
         risk_vectors.get("global_blocked", []),
-        threshold=block_threshold,
+        threshold=risky_threshold,
         category=_GLOBAL_SCOPE,
-        force_action="block",
     )
     all_hits.extend(global_hits)
 
-    # ── Step 2: Category-scoped hard negatives ────────────────────────────
-    # If the classifier produced no categories, fall back to the top-scorer
-    # so we can still apply category-scoped checks and risk-level routing.
-    # NOTE: this mutates `risk_levels` to include the implied category.
+    # Category hard_negatives — fall back to top-scoring category when classifier
+    # returned no labels so we can still apply category-scoped checks.
     check_cats = list(categories)
     if not check_cats and classifier_result.get("scores"):
         scores = classifier_result["scores"]
         if scores:
             top = max(scores, key=lambda c: scores[c].get("final_score", 0))
             check_cats = [top]
-            risk_levels[top] = cat_profiles.get(top, {}).get("risk_level", "medium")
 
     for cat in check_cats:
         cat_cfg = cat_profiles.get(cat, {})
         negatives = cat_cfg.get("hard_negatives", [])
+        safe_ex   = cat_cfg.get("safe_exceptions", [])
         if not negatives:
             continue
+
         cat_hits = _match_entries(
-            embedding,
-            negatives,
-            threshold=review_threshold,
-            category=cat,
+            embedding, negatives, threshold=risky_threshold, category=cat,
         )
-        all_hits.extend(cat_hits)
+        if not cat_hits:
+            continue
 
-    # ── Decision cascade ──────────────────────────────────────────────────
+        safe_hits = _match_entries(
+            embedding, safe_ex, threshold=risky_threshold, category=cat,
+        ) if safe_ex else []
 
-    # 1. Any block-action hit -> BLOCK
-    block_hits = [h for h in all_hits if h["action"] == "block"]
-    if block_hits:
-        for h in block_hits:
+        kept, dropped, deflect_reasons = _apply_safe_exceptions(cat_hits, safe_hits)
+        all_hits.extend(kept)
+        deflected_hits.extend(dropped)
+        reasons.extend(deflect_reasons)
+
+    if all_hits:
+        for h in all_hits:
             scope = "global" if h["category"] == _GLOBAL_SCOPE else f"category '{h['category']}'"
             reasons.append(
                 f"semantic match '{h['phrase']}' ({scope}, "
                 f"sim={h['similarity']:.3f}, matched='{h['matched_text']}'): "
                 f"{h['reason']}"
             )
-        return {
-            "is_risky": True,
-            "decision_reasons": reasons,
-            "hard_negative_hits": all_hits,
-            "risk_levels": risk_levels,
-        }
+    else:
+        reasons.append("no risk phrase matches")
 
-    # 2. Any review-action hit -> RISKY
-    review_hits = [h for h in all_hits if h["action"] == "review"]
-    if review_hits:
-        for h in review_hits:
-            reasons.append(
-                f"semantic match '{h['phrase']}' in category '{h['category']}' "
-                f"(sim={h['similarity']:.3f}): {h['reason']}"
-            )
-        return {
-            "is_risky": True,
-            "decision_reasons": reasons,
-            "hard_negative_hits": all_hits,
-            "risk_levels": risk_levels,
-        }
-
-    # 3. High-risk category -> RISKY
-    high_risk_cats = [c for c, rl in risk_levels.items() if rl == "high"]
-    if high_risk_cats:
-        reasons.append(f"high-risk category: {', '.join(sorted(high_risk_cats))}")
-        return {
-            "is_risky": True,
-            "decision_reasons": reasons,
-            "hard_negative_hits": all_hits,
-            "risk_levels": risk_levels,
-        }
-
-    # 4. Low confidence or unclassified -> RISKY
-    if conf_state in ("low_confidence", "unclassified"):
-        reasons.append(f"confidence_state={conf_state}")
-        return {
-            "is_risky": True,
-            "decision_reasons": reasons,
-            "hard_negative_hits": all_hits,
-            "risk_levels": risk_levels,
-        }
-
-    # 5. Classified + medium/low risk -> NOT RISKY
-    reasons.append(
-        f"classified with confidence, risk_level(s): "
-        f"{', '.join(f'{c}={rl}' for c, rl in sorted(risk_levels.items()))}"
-    )
-    return {
-        "is_risky": False,
-        "decision_reasons": reasons,
-        "hard_negative_hits": all_hits,
-        "risk_levels": risk_levels,
-    }
+    return _build()

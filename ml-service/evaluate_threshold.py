@@ -51,6 +51,7 @@ from classifier import (
     load_keywords,
     predict,
 )
+from config import MARGIN_DELTA_DEFAULT
 from db import get_connection
 
 THRESHOLDS_SWEEP = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
@@ -119,6 +120,7 @@ def evaluate_at(
     threshold: float,
     chapter_titles: dict | None = None,
     collect_fine: bool = False,
+    margin_delta: float = MARGIN_DELTA_DEFAULT,
 ) -> dict:
     """
     Compute micro-averaged precision/recall/F1 + per-category breakdown +
@@ -146,6 +148,7 @@ def evaluate_at(
             category_config,
             threshold=threshold,
             chapter_titles=chapter_titles,
+            margin_delta=margin_delta,
         )
         predicted = set(result["categories"])
         expected  = sample["expected"]
@@ -278,16 +281,18 @@ def _print_fine(result: dict, top_n: int = 20) -> None:
 
 def run_validation_sweep(
     samples: list[dict], centroids: dict, keywords: dict, category_config: dict,
-    chapter_titles: dict, fine: bool,
+    chapter_titles: dict, fine: bool, margin_delta: float,
 ) -> float:
-    print(f"\n{'threshold':>10}  {'precision':>10}  {'recall':>8}  {'f1':>8}  "
+    print(f"\nmargin_delta = {margin_delta:.3f}")
+    print(f"{'threshold':>10}  {'precision':>10}  {'recall':>8}  {'f1':>8}  "
           f"{'tp':>5}  {'fp':>5}  {'fn':>5}  {'n':>5}")
     print("-" * 68)
 
     results = []
     for t in THRESHOLDS_SWEEP:
         r = evaluate_at(samples, centroids, keywords, category_config, t,
-                        chapter_titles=chapter_titles, collect_fine=fine)
+                        chapter_titles=chapter_titles, collect_fine=fine,
+                        margin_delta=margin_delta)
         results.append(r)
         print(
             f"{r['threshold']:>10.2f}  {r['precision']:>10.4f}  "
@@ -314,10 +319,11 @@ def run_validation_sweep(
 def run_test_confirmation(
     samples: list[dict], centroids: dict, keywords: dict,
     category_config: dict, threshold: float,
-    chapter_titles: dict, fine: bool,
+    chapter_titles: dict, fine: bool, margin_delta: float,
 ) -> None:
     r = evaluate_at(samples, centroids, keywords, category_config, threshold,
-                    chapter_titles=chapter_titles, collect_fine=fine)
+                    chapter_titles=chapter_titles, collect_fine=fine,
+                    margin_delta=margin_delta)
     print(f"\n{'-' * 68}")
     print(f"  FINAL TEST EVALUATION at threshold={threshold:.2f}")
     print(f"  (held-out set — {r['n_samples']} samples)")
@@ -342,6 +348,10 @@ if __name__ == "__main__":
     source.add_argument("--split", choices=["validation", "test"])
     source.add_argument("--csv", metavar="PATH")
     parser.add_argument("--threshold", type=float, metavar="FLOAT")
+    parser.add_argument("--margin-delta", type=float, default=MARGIN_DELTA_DEFAULT,
+                        metavar="FLOAT",
+                        help=f"Top-margin rule delta (default: {MARGIN_DELTA_DEFAULT}). "
+                             "Secondary labels fire only within δ of the top final_score.")
     parser.add_argument("--fine", action="store_true",
                         help="Also report HS-chapter (fine-grained) accuracy.")
     args = parser.parse_args()
@@ -372,10 +382,11 @@ if __name__ == "__main__":
 
         if args.csv or args.split == "validation":
             run_validation_sweep(samples, centroids, keywords, category_config,
-                                 chapter_titles, args.fine)
+                                 chapter_titles, args.fine, args.margin_delta)
         else:
             run_test_confirmation(samples, centroids, keywords, category_config,
-                                  args.threshold, chapter_titles, args.fine)
+                                  args.threshold, chapter_titles, args.fine,
+                                  args.margin_delta)
 
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
