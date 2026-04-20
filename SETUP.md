@@ -291,6 +291,197 @@ All three load the embedding model but need no DB.
 
 ---
 
+## 12. Clean start + exercise the three-phase defense
+
+Use this when you want a **reproducible from-zero run** that actually proves each new layer does something. Every step is copy-paste; the whole walk takes ~8 minutes after the initial install.
+
+### 12.0. Wipe and re-init (optional, only if you want a truly clean slate)
+
+> **Destructive** — drops all data in the container, including any classifications you've written. Skip if you want to keep what's there.
+
+```bash
+# From repo root
+docker compose down -v                 # wipes DB volume
+docker compose up -d                   # fresh container
+# wait ~10 seconds for pgvector to be ready
+python init_db.py                      # schema + seed data
+cd ml-service
+python centroid_builder.py             # ~2-4 min
+python fit_calibration.py              # ~30 sec
+```
+
+### 12.1. Start the service (Phase 1 active, Phase 3 off — the default)
+
+```bash
+# Inside ml-service/ with venv active
+uvicorn main:app --port 8000 --reload
+```
+
+Confirm Phase 1 is wired in and Phase 3 is off:
+
+```bash
+curl http://localhost:8000/health
+# expect ...  "reranker_enabled": false  ...
+```
+
+### 12.2. Smoke-test Phase 1 (top-margin rule)
+
+The margin rule suppresses weak tail labels. To see it work, classify a row that previously over-labeled. Pick one that should clearly be `automotive` alone:
+
+```bash
+curl -X POST http://localhost:8000/classify ^
+  -H "Content-Type: application/json" ^
+  -d "{\"shipment_id\":\"m1\",\"cargo_description\":\"Tesla Model 3 electric vehicle spare parts motor battery cells\",\"commodity_description\":\"automotive components\"}"
+```
+
+Expected in the response: `result.categories` is a **single** entry (`automotive`). Before the margin rule this row typically fired 4–5 labels because `motor`, `cell`, `battery`, `electronics`-adjacent tokens all leaked above threshold.
+
+Now check the counter:
+
+```bash
+curl http://localhost:8000/metrics
+# expect margin_suppressions_total > 0 (labels the rule dropped across every /classify call since startup)
+```
+
+`margin_suppressions_total / predictions_total` is the rough rate at which the rule fires in practice.
+
+### 12.3. Grid-sweep `threshold × margin_delta` on labeled data
+
+```bash
+python calibrate.py
+```
+
+Expected output: F1 heatmap across 42 cells (7 thresholds × 6 deltas), plus a top-5 table like:
+
+```
+Top 5 cells by F1:
+  #  threshold   delta   precision    recall        f1     tp     fp     fn
+  1      0.450   0.060      0.8914    0.9183    0.9047    ...
+  ...
+Recommended: CLASSIFY_THRESHOLD=0.45  MARGIN_DELTA=0.06
+```
+
+If the recommendation differs from the defaults in [config.py](ml-service/config.py), set the env vars and restart:
+
+```bash
+# PowerShell
+$env:CLASSIFY_THRESHOLD="0.45"; $env:MARGIN_DELTA="0.06"; uvicorn main:app --port 8000
+# Bash
+CLASSIFY_THRESHOLD=0.45 MARGIN_DELTA=0.06 uvicorn main:app --port 8000
+```
+
+Confirm on the test split (no more tuning allowed after this point):
+
+```bash
+python evaluate_threshold.py --split test --threshold 0.45 --margin-delta 0.06
+```
+
+### 12.4. Preview & apply Phase 2 (keyword prune)
+
+Dry-run first — nothing changes until you pass `--apply`:
+
+```bash
+python -m diagnostics.prune_keywords
+```
+
+Expected: a per-category table, e.g. `toys  183 keywords  pruned 41  (22.4%)` with sample `removed:` / `kept:` lists and a total reduction in the 10–25% range. Eyeball for anything obviously wrong (e.g. if a famously category-defining keyword is in the removed list, raise `--min-cosine`).
+
+Targeted preview for one category:
+
+```bash
+python -m diagnostics.prune_keywords --category toys
+```
+
+When happy, commit. A CSV snapshot is written automatically for rollback.
+
+```bash
+python -m diagnostics.prune_keywords --apply
+curl -X POST http://localhost:8000/reload     # pick up the smaller keyword table
+```
+
+Snapshot path appears in the script output — keep it until you're sure the prune is good.
+
+### 12.5. Re-run the Tesla smoke test after prune
+
+```bash
+curl -X POST http://localhost:8000/classify ^
+  -H "Content-Type: application/json" ^
+  -d "{\"shipment_id\":\"m2\",\"cargo_description\":\"Tesla Model 3 electric vehicle spare parts motor battery cells\",\"commodity_description\":\"automotive components\"}"
+```
+
+Expected: still single-label `automotive`, but with fewer runner-up categories showing up in `result.scores`. Keyword pollution is gone at the source, not just suppressed at decision time.
+
+### 12.6. Turn on Phase 3 (cross-encoder reranker)
+
+**Stop the running uvicorn first** (Ctrl+C). Then relaunch with the env var:
+
+```bash
+# PowerShell
+$env:RERANKER_ENABLED="true"; uvicorn main:app --port 8000
+# Bash
+RERANKER_ENABLED=true uvicorn main:app --port 8000
+```
+
+Startup logs gain one line:
+
+```
+Cross-encoder reranker enabled: cross-encoder/ms-marco-MiniLM-L-6-v2
+```
+
+First startup downloads the CE model (~90 MB, one-time). `/health` now reports `"reranker_enabled": true`.
+
+Pick a row that genuinely has 2+ candidates after the margin rule (a product at the boundary of two categories):
+
+```bash
+curl -X POST http://localhost:8000/classify ^
+  -H "Content-Type: application/json" ^
+  -d "{\"shipment_id\":\"r1\",\"cargo_description\":\"cotton t-shirts printed with floral pattern\",\"commodity_description\":\"apparel textiles garment\"}"
+```
+
+Expected in the response: `meta.reranked: true` on rows where Phase 3 actually ran. Each scored category now carries `cross_encoder_score` (raw logit) and `cross_encoder_prob` (sigmoid) fields so you can see what the CE thought.
+
+Counter check:
+
+```bash
+curl http://localhost:8000/metrics
+# rerank_fires_total > 0 means Phase 3 ran on at least one row
+# rerank_drops_total > 0 means Phase 3 shortened someone's label list
+```
+
+### 12.7. Roll back one phase at a time (if needed)
+
+| To disable | How |
+|---|---|
+| Phase 3 (reranker) | Stop uvicorn, unset `RERANKER_ENABLED`, restart |
+| Phase 2 (prune) | Replay the CSV snapshot: `psql … -c "\copy category_keywords(category_id, keyword, weight) FROM 'diagnostics/prune_backup_YYYYMMDD_HHMMSS.csv' CSV HEADER"` then `POST /reload` |
+| Phase 1 (margin rule) | Set `MARGIN_DELTA=1.0` (effectively disables the cutoff) and restart |
+
+### 12.8. Quick end-to-end smoke script
+
+If you want one command to verify the full stack is alive:
+
+```bash
+# PowerShell
+$tests = @(
+  '{"shipment_id":"e1","cargo_description":"LEGO building blocks educational toy","commodity_description":"plastic toys"}',
+  '{"shipment_id":"e2","cargo_description":"Tesla Model 3 EV spare parts","commodity_description":"automotive"}',
+  '{"shipment_id":"e3","cargo_description":"depleted uranium fuel rods","commodity_description":"nuclear material"}'
+)
+foreach ($t in $tests) {
+  Invoke-RestMethod -Method Post -Uri http://localhost:8000/classify -ContentType "application/json" -Body $t |
+    Select-Object -ExpandProperty result | Select-Object categories, confidence_state
+}
+Invoke-RestMethod http://localhost:8000/metrics
+```
+
+You should see:
+- `e1` → `toys`, `classified`
+- `e2` → `automotive`, `classified`
+- `e3` → `[]`, `unclassified` (but the full response will have `compliance.is_risky: true`)
+- `/metrics` with non-zero `predictions_total` and some `margin_suppressions_total`.
+
+---
+
 ## You're done
 
 - API: <http://localhost:8000>
