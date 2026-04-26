@@ -262,19 +262,122 @@ def load_keywords(conn) -> dict[str, list[tuple[str, float]]]:
 
     Returns:
         {category_name: [(keyword_lowercase, weight), ...]}
+
+    Backwards-compatible legacy view. Includes only ``signal_class='signal'``
+    rows once CCTR has been applied (anchors, modifiers and suppressors don't
+    enter the legacy keyword score). Pre-CCTR rows have ``signal_class`` as
+    the column default ``'signal'`` so they pass through.
     """
     keywords: dict[str, list] = defaultdict(list)
     with conn.cursor() as cur:
+        # Defensively detect signal_class column to keep working against
+        # un-migrated installs.
         cur.execute("""
-            SELECT cc.name, ck.keyword, ck.weight
-            FROM   category_keywords ck
-            JOIN   classification_categories cc ON cc.id = ck.category_id
-            WHERE  cc.is_active = true
-            ORDER  BY cc.name, ck.keyword
+            SELECT 1 FROM information_schema.columns
+            WHERE  table_name='category_keywords' AND column_name='signal_class'
         """)
+        has_class = cur.fetchone() is not None
+
+        if has_class:
+            cur.execute("""
+                SELECT cc.name, ck.keyword, ck.weight
+                FROM   category_keywords ck
+                JOIN   classification_categories cc ON cc.id = ck.category_id
+                WHERE  cc.is_active = true
+                  AND  ck.signal_class = 'signal'
+                ORDER  BY cc.name, ck.keyword
+            """)
+        else:
+            cur.execute("""
+                SELECT cc.name, ck.keyword, ck.weight
+                FROM   category_keywords ck
+                JOIN   classification_categories cc ON cc.id = ck.category_id
+                WHERE  cc.is_active = true
+                ORDER  BY cc.name, ck.keyword
+            """)
         for name, keyword, weight in cur.fetchall():
             keywords[name].append((keyword.lower(), float(weight)))
     return dict(keywords)
+
+
+# ── CCTR typed keyword loader ────────────────────────────────────────────────
+# Returns the full per-chapter, signal-class-aware view that drives the
+# modifier→signal→suppressor pipeline. Distinct from `load_keywords` (legacy
+# flat shape) so existing callers stay working unchanged.
+
+# A typed keyword row. Stored per category as a list of these. The plain
+# tuple form keeps it picklable and cheap to index.
+#   keyword:      lowercased
+#   weight:       NUMERIC(3,2) → float
+#   hs_chapter:   '01'..'97' (or '' for un-migrated legacy rows)
+#   signal_class: 'anchor' | 'signal' | 'suppressor' | 'modifier'
+#   targets:      list[str] of chapters this row retypes (modifier rows only;
+#                 empty list for non-modifier classes)
+KeywordRow = tuple[str, float, str, str, list[str]]
+
+
+def load_keywords_typed(conn) -> dict[str, list[KeywordRow]]:
+    """
+    Load every category_keywords row with its (hs_chapter, signal_class)
+    typing intact. Used by the CCTR scoring path and by collision-aware
+    diagnostics — never by the legacy keyword_score function.
+
+    Returns:
+        {category_name: [(keyword, weight, hs_chapter, signal_class, targets), ...]}
+
+    For modifier rows the ``notes`` column is parsed for a ``targets:ch85,ch87``
+    directive — modifiers without a target list don't retype anything and
+    behave like a no-op. Plain English notes (no ``targets:`` token) are
+    ignored. This keeps the seed/SQL contract unchanged: the targets list
+    rides on the existing ``notes`` column, no schema bump.
+    """
+    typed: dict[str, list[KeywordRow]] = defaultdict(list)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE  table_name='category_keywords' AND column_name='signal_class'
+        """)
+        if cur.fetchone() is None:
+            # Pre-migration install: every row defaults to signal_class='signal'
+            # with no chapter. The CCTR path is a no-op in that case (all rows
+            # are plain signals with chapter==''), so it falls back to the
+            # legacy behaviour.
+            cur.execute("""
+                SELECT cc.name, ck.keyword, ck.weight
+                FROM   category_keywords ck
+                JOIN   classification_categories cc ON cc.id = ck.category_id
+                WHERE  cc.is_active = true
+                ORDER  BY cc.name, ck.keyword
+            """)
+            for name, keyword, weight in cur.fetchall():
+                typed[name].append((keyword.lower(), float(weight), "", "signal", []))
+            return dict(typed)
+
+        cur.execute("""
+            SELECT cc.name, ck.keyword, ck.weight,
+                   COALESCE(ck.hs_chapter, ''), ck.signal_class, ck.notes
+            FROM   category_keywords ck
+            JOIN   classification_categories cc ON cc.id = ck.category_id
+            WHERE  cc.is_active = true
+            ORDER  BY cc.name, ck.signal_class, ck.hs_chapter, ck.keyword
+        """)
+        for name, keyword, weight, hs, sclass, notes in cur.fetchall():
+            targets: list[str] = []
+            if sclass == "modifier" and notes:
+                # Format: any substring "targets:ch85,ch87,ch95" (chapters
+                # may be 2-digit with or without 'ch' prefix). Anything else
+                # in `notes` is free-text justification — ignored here.
+                m = re.search(r"targets:([\w,\s]+)", notes, flags=re.IGNORECASE)
+                if m:
+                    raw = m.group(1)
+                    for tok in re.split(r"[,\s]+", raw):
+                        tok = tok.strip().lower().lstrip("ch").zfill(2)
+                        if tok and tok.isdigit() and len(tok) == 2:
+                            targets.append(tok)
+            typed[name].append(
+                (keyword.lower(), float(weight), hs or "", sclass, targets)
+            )
+    return dict(typed)
 
 
 def load_category_config(conn) -> dict[str, dict]:
@@ -403,6 +506,202 @@ def embed_texts(texts: list[str]) -> np.ndarray:
 
 
 # ── Scoring core (shared by predict and predict_batch) ────────────────────────
+
+# ── CCTR scoring pipeline ────────────────────────────────────────────────────
+# These helpers operate on the typed keyword shape (load_keywords_typed). They
+# implement the modifier→signal→suppressor composition the CCTR plan describes
+# at chapter granularity. Centroid lookup and the final cosine-vs-keyword
+# blend are unchanged — this just replaces the legacy per-category flat
+# keyword score with a per-chapter score that knows about classes.
+
+def _kw_hits(
+    text_lower: str,
+    keyword: str,
+) -> bool:
+    """Word-boundary match with one-char plural tolerance, mirroring the
+    legacy keyword_score loop. Kept inline so the CCTR path doesn't take
+    a round-trip through the legacy scorer (which sums weights, not what
+    we want when we're discriminating by signal class)."""
+    kw_l = keyword.lower()
+    kw_singular = _singularize(kw_l)
+    pat = rf"\b{re.escape(kw_l)}s?\b"
+    if re.search(pat, text_lower):
+        return True
+    if kw_singular != kw_l:
+        if re.search(rf"\b{re.escape(kw_singular)}s?\b", text_lower):
+            return True
+    return False
+
+
+def _modifier_retype_targets(
+    text_lower: str,
+    typed_rows: list[KeywordRow],
+) -> set[str]:
+    """Return the union of chapter targets activated by every modifier row
+    that matches the text. Empty set means no modifier fired. The caller
+    uses this to retype signals: any signal whose hs_chapter is in this
+    set keeps its weight; signals OUTSIDE the set in the same category
+    are unaffected (we don't redirect signals across categories — that's
+    what the collision registry is for)."""
+    out: set[str] = set()
+    tl = text_lower.lower() if text_lower else text_lower
+    for kw, _w, _hs, sclass, targets in typed_rows:
+        if sclass != "modifier":
+            continue
+        if _kw_hits(tl, kw):
+            for t in targets:
+                out.add(t)
+    return out
+
+
+def _per_chapter_score(
+    text_lower: str,
+    typed_rows: list[KeywordRow],
+    retyped_chapters: set[str],
+) -> tuple[dict[str, float], dict[str, list[str]]]:
+    """Compute per-chapter saturating keyword score from anchors + signals
+    (with modifier retyping) minus suppressors.
+
+    Returns:
+        ({hs_chapter: score in [0, 1]}, {hs_chapter: hit_keywords})
+    Categories with zero matched keywords return an empty dict.
+    """
+    chapter_sum: dict[str, float] = defaultdict(float)
+    chapter_hits: dict[str, list[str]] = defaultdict(list)
+    tl = text_lower.lower() if text_lower else text_lower
+
+    for kw, weight, hs, sclass, _targets in typed_rows:
+        if sclass == "modifier":
+            continue                                # modifiers vote indirectly
+        if not hs:
+            # Un-migrated legacy row — treat as an unchaptered signal.
+            # Skip; the legacy scorer handles it. This path should be empty
+            # once migrate_keywords_to_per_chapter.py has run.
+            continue
+        if not _kw_hits(tl, kw):
+            continue
+
+        if sclass == "anchor":
+            # Anchors always count for their chapter, regardless of modifiers.
+            chapter_sum[hs] += weight
+            chapter_hits[hs].append(kw)
+        elif sclass == "signal":
+            # Signal weight applies to its native chapter UNLESS a modifier
+            # has retyped: in that case the signal's weight is moved to the
+            # retyped chapters (cleared from native, added to each target).
+            if retyped_chapters and hs not in retyped_chapters:
+                # Signal lives in a chapter the modifier didn't endorse —
+                # redirect its full weight to every retyped chapter.
+                for t in retyped_chapters:
+                    chapter_sum[t] += weight
+                    chapter_hits[t].append(f"{kw}->ch{t}")
+            else:
+                chapter_sum[hs] += weight
+                chapter_hits[hs].append(kw)
+        elif sclass == "suppressor":
+            chapter_sum[hs] -= weight
+            chapter_hits[hs].append(f"-{kw}")
+
+    # Saturate. Negative sums (heavy suppression) clamp to 0.
+    chapter_score: dict[str, float] = {}
+    for hs, raw in chapter_sum.items():
+        clamped = max(0.0, raw)
+        chapter_score[hs] = round(1.0 - math.exp(-KEYWORD_SATURATION_ALPHA * clamped), 4)
+    return chapter_score, dict(chapter_hits)
+
+
+def _score_one_typed(
+    text_norm: str,
+    embedding: np.ndarray,
+    centroids: dict[str, list[tuple[str, np.ndarray]]],
+    keywords_typed: dict[str, list[KeywordRow]],
+    category_config: dict[str, dict],
+    chapter_titles: dict[str, str] | None = None,
+) -> tuple[dict, float]:
+    """CCTR per-chapter scoring path. Falls back to legacy scoring shape on
+    output (same dict keys), so callers can swap this in without touching the
+    rest of the response.
+
+    Per-category, the winning chapter is the one that maximizes
+    ``sw * cos_chapter + kw_w * chapter_keyword_score`` where chapter_keyword_score
+    is the saturating sum of (anchors + retyped signals - suppressors) for
+    that chapter only. Modifiers in the text retype signals across chapters
+    BEFORE the per-chapter score is computed.
+    """
+    if chapter_titles is None:
+        chapter_titles = {}
+
+    text_lower = text_norm.lower()
+
+    scores: dict[str, dict] = {}
+    max_score = -1.0
+
+    for category, children in centroids.items():
+        chapters = [c[0] for c in children]
+        stacked  = np.stack([c[1] for c in children])
+        sims     = stacked @ embedding                        # (k,)
+
+        rows = keywords_typed.get(category, [])
+        retyped = _modifier_retype_targets(text_lower, rows)
+        per_ch_score, per_ch_hits = _per_chapter_score(text_lower, rows, retyped)
+
+        cfg  = category_config.get(category, {})
+        sw   = cfg.get("semantic_weight", 0.8)
+        kw_w = cfg.get("keyword_weight",  0.2)
+        if sw + kw_w <= 0:
+            sw, kw_w = 0.8, 0.2
+
+        # Per-chapter blended scores, then pick the category's winning chapter.
+        best_chapter = chapters[0]
+        best_final   = -1.0
+        best_sem     = 0.0
+        best_kw      = 0.0
+        for k, hs in enumerate(chapters):
+            sem_k   = round(float(sims[k]), 4)
+            kw_k    = per_ch_score.get(hs, 0.0)
+            final_k = round(sw * sem_k + kw_w * kw_k, 4)
+            if final_k > best_final:
+                best_final   = final_k
+                best_chapter = hs
+                best_sem     = sem_k
+                best_kw      = kw_k
+
+        # Aggregate matched keywords across all chapters for audit clarity —
+        # an operator inspecting why a category fired wants to see every hit,
+        # not just the winning chapter's.
+        all_hits: list[str] = []
+        seen: set[str] = set()
+        for hs_hits in per_ch_hits.values():
+            for h in hs_hits:
+                if h not in seen:
+                    seen.add(h)
+                    all_hits.append(h)
+
+        # Platt calibration if fit, else passthrough.
+        pa = cfg.get("platt_a")
+        pb = cfg.get("platt_b")
+        if pa is not None and pb is not None:
+            probability = round(1.0 / (1.0 + math.exp(-(pa * best_final + pb))), 4)
+        else:
+            probability = best_final
+
+        scores[category] = {
+            "semantic_score":     best_sem,
+            "keyword_score":      best_kw,
+            "final_score":        best_final,
+            "probability":        probability,
+            "matched":            False,
+            "keywords_hit":       all_hits,
+            "best_chapter":       best_chapter,
+            "best_chapter_title": chapter_titles.get(best_chapter, ""),
+            "best_cluster":       chapters.index(best_chapter),
+            "modifiers_active":   sorted(retyped),
+        }
+        if best_final > max_score:
+            max_score = best_final
+
+    return scores, max_score
+
 
 def _score_one(
     text_norm: str,
@@ -613,6 +912,7 @@ def predict(
     chapter_to_category: dict[str, str] | None = None,
     category_descriptions: dict[str, str] | None = None,
     margin_delta: float = MARGIN_DELTA_DEFAULT,
+    keywords_typed: dict[str, list[KeywordRow]] | None = None,
 ) -> dict:
     """
     Classify a single shipment.
@@ -658,13 +958,23 @@ def predict(
 
     chunks = chunk_text(text_for_embedding, model)
 
+    # CCTR: prefer typed scoring when typed keywords were loaded.
+    from config import CCTR_ENABLED
+    use_typed = keywords_typed is not None and CCTR_ENABLED
+
     if len(chunks) == 1:
         # Fast path — byte-identical behavior to the pre-chunking version.
         embedding = embed_texts([text_for_embedding])[0]
-        scores, max_score = _score_one(
-            text_for_keywords, embedding, centroids, keywords, category_config,
-            chapter_titles=chapter_titles,
-        )
+        if use_typed:
+            scores, max_score = _score_one_typed(
+                text_for_keywords, embedding, centroids, keywords_typed,
+                category_config, chapter_titles=chapter_titles,
+            )
+        else:
+            scores, max_score = _score_one(
+                text_for_keywords, embedding, centroids, keywords, category_config,
+                chapter_titles=chapter_titles,
+            )
         matched, state, reason = _apply_bands(scores, max_score, threshold, unclassified_threshold, margin_delta)
         matched, reranked = _maybe_rerank(
             text_for_embedding, matched, state, scores, category_descriptions
@@ -688,11 +998,18 @@ def predict(
     chunk_embeddings = embed_texts(chunks)  # (n_chunks, dim)
     per_chunk_scores: list[dict] = []
     for i in range(len(chunks)):
-        s, _ = _score_one(
-            text_for_keywords, chunk_embeddings[i],
-            centroids, keywords, category_config,
-            chapter_titles=chapter_titles,
-        )
+        if use_typed:
+            s, _ = _score_one_typed(
+                text_for_keywords, chunk_embeddings[i],
+                centroids, keywords_typed, category_config,
+                chapter_titles=chapter_titles,
+            )
+        else:
+            s, _ = _score_one(
+                text_for_keywords, chunk_embeddings[i],
+                centroids, keywords, category_config,
+                chapter_titles=chapter_titles,
+            )
         per_chunk_scores.append(s)
 
     scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
@@ -729,6 +1046,7 @@ def predict_batch(
     chapter_to_category: dict[str, str] | None = None,
     category_descriptions: dict[str, str] | None = None,
     margin_delta: float = MARGIN_DELTA_DEFAULT,
+    keywords_typed: dict[str, list[KeywordRow]] | None = None,
 ) -> list[dict]:
     """
     Batched inference — single model.encode() call for all valid rows.
@@ -818,10 +1136,16 @@ def predict_batch(
             if count == 1:
                 # Fast path — same shape as today.
                 embedding = row_embeddings[0]
-                scores, max_score = _score_one(
-                    text_norm, embedding, centroids, keywords, category_config,
-                    chapter_titles=chapter_titles,
-                )
+                if keywords_typed is not None:
+                    scores, max_score = _score_one_typed(
+                        text_norm, embedding, centroids, keywords_typed,
+                        category_config, chapter_titles=chapter_titles,
+                    )
+                else:
+                    scores, max_score = _score_one(
+                        text_norm, embedding, centroids, keywords, category_config,
+                        chapter_titles=chapter_titles,
+                    )
                 matched, state, reason = _apply_bands(scores, max_score, thr, unc, margin_delta)
                 matched, reranked = _maybe_rerank(
                     query_text, matched, state, scores, category_descriptions
@@ -843,11 +1167,18 @@ def predict_batch(
             else:
                 per_chunk_scores: list[dict] = []
                 for ci in range(count):
-                    s, _ = _score_one(
-                        text_norm, row_embeddings[ci],
-                        centroids, keywords, category_config,
-                        chapter_titles=chapter_titles,
-                    )
+                    if keywords_typed is not None:
+                        s, _ = _score_one_typed(
+                            text_norm, row_embeddings[ci],
+                            centroids, keywords_typed, category_config,
+                            chapter_titles=chapter_titles,
+                        )
+                    else:
+                        s, _ = _score_one(
+                            text_norm, row_embeddings[ci],
+                            centroids, keywords, category_config,
+                            chapter_titles=chapter_titles,
+                        )
                     per_chunk_scores.append(s)
                 scores, max_score, winner_idx = _aggregate_chunk_scores(per_chunk_scores)
                 matched, state, reason = _apply_bands(scores, max_score, thr, unc, margin_delta)

@@ -70,3 +70,18 @@ RERANKER_ENABLED               = _bool_env("RERANKER_ENABLED",          False)
 RERANKER_MODEL                 = os.environ.get("RERANKER_MODEL",
                                                 "cross-encoder/ms-marco-MiniLM-L-6-v2")
 CROSS_ENCODER_MARGIN_DEFAULT   = _float_env("CROSS_ENCODER_MARGIN",     0.15)
+
+# ── CCTR (Context-Conditional Token Resolution) knobs ────────────────────────
+# Whether _score_one prefers the typed (per-chapter, signal-class-aware)
+# scoring path when a keywords_typed dict is supplied. False forces the legacy
+# untyped path even when typed data is available — lets ops A/B-compare.
+CCTR_ENABLED                   = _bool_env("CCTR_ENABLED",              True)
+
+# Margin in final_score below which a high-tier collision causes the system to
+# defer rather than guess. See ml-service/collision_resolver.py.
+CCTR_DANGER_PAIR_MARGIN        = _float_env("CCTR_DANGER_PAIR_MARGIN",  0.05)
+
+# Bounds the rebalancer respects on `signal_class IN ('signal',)` rows.
+# Anchors / suppressors / modifiers are immune to the rebalancer regardless.
+CCTR_WEIGHT_FLOOR              = _float_env("CCTR_WEIGHT_FLOOR",        0.10)
+CCTR_WEIGHT_CAP                = _float_env("CCTR_WEIGHT_CAP",          1.00)

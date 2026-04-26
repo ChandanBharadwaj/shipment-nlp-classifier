@@ -302,8 +302,14 @@ def iter_rows(
     chapter_map: dict[str, tuple[str, str]],
     overrides: dict[str, list[str]],
     uk_headings: dict[str, list[str]],
-) -> Iterator[tuple[str, str, str, str, str, str]]:
-    """Yield (shipment_id, category_name, cargo, commodity, hs_chapter, split)."""
+) -> Iterator[tuple[str, str, str, str, str, str, str]]:
+    """Yield (shipment_id, category_name, cargo, commodity, hs_chapter, split, hs_code).
+
+    hs_code is internal-only — it's used by the chapter-lock pass to break
+    accidental commodity-text collisions between two different 6-digit codes
+    that happen to render the same string. ``write_sql`` drops it before
+    emitting INSERT statements, so the schema is unchanged.
+    """
     chapter_titles = {ch: info[1] for ch, info in chapter_map.items()}
     variants_per_code = compute_variants_per_code(hs_rows, chapter_map)
     rng_master = random.Random(42)
@@ -317,6 +323,9 @@ def iter_rows(
         primary_cat = primary[0]
 
         # Multi-label resolution: check both 4-digit and 6-digit prefixes.
+        # NB: a commodity_text *may* legitimately span multiple categories iff
+        # it does so via this overrides path — those rows share shipment_id and
+        # are expected duplicates. The chapter-lock check below preserves that.
         extra_cats: list[str] = []
         for prefix in (code["hs_code"], code["hs_code"][:4]):
             if prefix in overrides:
@@ -328,15 +337,98 @@ def iter_rows(
         for v in range(variants):
             ship_counter += 1
             sid = f"v2_{ship_counter:06d}"
-            # Per-variant RNG stream — deterministic per (hs_code, v)
-            rng = random.Random(int(hashlib.md5(f"{code['hs_code']}:{v}:{rng_master.random()}".encode()).hexdigest(), 16) & 0xFFFFFFFF)
-            # Actually, seed strictly from (hs_code, v) so output is byte-stable:
+            # Seed strictly from (hs_code, v) so output is byte-stable.
             rng = random.Random(f"{code['hs_code']}:{v}")
             cargo, commodity = render_variant(code, v, uk_headings, chapter_titles, rng)
             split = split_of(sid)
-            yield (sid, primary_cat, cargo, commodity, chapter, split)
+            yield (sid, primary_cat, cargo, commodity, chapter, split, code["hs_code"])
             for extra in extra_cats:
-                yield (sid, extra, cargo, commodity, chapter, split)
+                yield (sid, extra, cargo, commodity, chapter, split, code["hs_code"])
+
+
+# ── Chapter-lock cleanup pass ─────────────────────────────────────────────────
+# Defends the CCTR P1/P2 invariant: for any single commodity_text in the
+# generated training set, the set of categories it appears under must be a
+# subset of the multilabel-overrides intent. If a commodity_text accidentally
+# leaks into a category it has no business being in (because the rendered
+# string was too generic — "Other", "Parts", a chapter title alone — and
+# happens to match a different chapter's leaf), we disambiguate by appending
+# the chapter title. Choosing chapter title over chapter number keeps the text
+# embedding-friendly: "Live horses (Live animals)" still embeds well, "Live
+# horses [ch01]" does not.
+
+def chapter_lock_rows(
+    rows: list[tuple[str, str, str, str, str, str, str]],
+    chapter_titles: dict[str, str],
+) -> list[tuple[str, str, str, str, str, str, str]]:
+    """Rewrite commodity_text so it never resolves to >1 category.
+
+    A row is *legitimately* multi-category when it shares a shipment_id with
+    another category-bearing row (the overrides path). Those are kept as-is.
+    A row is *accidentally* multi-category when the same commodity_text shows
+    up under a different shipment_id in another category — those get the
+    chapter title and 6-digit HS code appended to disambiguate. The HS code
+    is necessary because two distinct codes in the same chapter sometimes
+    render the same commodity_text, and only one of them has overrides — so
+    chapter-title alone can't separate them.
+    """
+    # Build commodity → set(category, shipment_id) so we can distinguish
+    # override-twins (same sid, multi-cat, expected) from accidental collisions
+    # (different sids, multi-cat, must be fixed).
+    commodity_to_cats: dict[str, set[str]] = defaultdict(set)
+    commodity_to_sids: dict[str, set[str]] = defaultdict(set)
+    for sid, cat, _cargo, com, _chap, _split, _hs in rows:
+        commodity_to_cats[com].add(cat)
+        commodity_to_sids[com].add(sid)
+
+    # A commodity is "leaking" iff it appears under multiple categories AND
+    # under multiple shipment_ids (i.e. not just an overrides-twin pair).
+    leaking: set[str] = {
+        com for com, cats in commodity_to_cats.items()
+        if len(cats) > 1 and len(commodity_to_sids[com]) > 1
+    }
+
+    if not leaking:
+        return rows
+
+    print(f"  chapter-lock: rewriting {len(leaking):,} leaking commodity_text strings")
+    out: list[tuple[str, str, str, str, str, str, str]] = []
+    for sid, cat, cargo, com, chap, split, hs in rows:
+        if com in leaking:
+            title = chapter_titles.get(chap, "").strip().lower()
+            tag = f" [ch{chap}/{hs}: {title}]" if title else f" [ch{chap}/{hs}]"
+            com = (com + tag)[:240]
+        out.append((sid, cat, cargo, com, chap, split, hs))
+    return out
+
+
+def assert_chapter_locked(
+    rows: list[tuple[str, str, str, str, str, str, str]],
+) -> None:
+    """Hard fail at generation time if the chapter-lock invariant is broken."""
+    by_commodity: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for sid, cat, _cargo, com, _chap, _split, _hs in rows:
+        by_commodity[com][cat].add(sid)
+
+    violations = []
+    for com, cat_sids in by_commodity.items():
+        if len(cat_sids) <= 1:
+            continue
+        # Multi-cat OK iff every category shares at least one shipment_id with
+        # every other (the overrides-twin pattern). Otherwise it's a leak.
+        all_sids = set().union(*cat_sids.values())
+        per_cat_sids = list(cat_sids.values())
+        # Twin-check: every shipment_id appears in *every* category for this commodity.
+        twins_ok = all(s == all_sids for s in per_cat_sids)
+        if not twins_ok:
+            violations.append((com, sorted(cat_sids.keys())))
+
+    if violations:
+        sample = "\n".join(f"  '{c[:60]}' → {cats}" for c, cats in violations[:10])
+        raise AssertionError(
+            f"Chapter-lock invariant broken: {len(violations)} commodity_texts "
+            f"resolve to multiple categories outside the overrides path.\n{sample}"
+        )
 
 
 # ── SQL emission ─────────────────────────────────────────────────────────────
@@ -345,7 +437,9 @@ def _sql_esc(s: str) -> str:
     return s.replace("'", "''")
 
 
-def write_sql(rows: list[tuple[str, str, str, str, str, str]], path: Path) -> None:
+def write_sql(rows: list[tuple[str, str, str, str, str, str, str]], path: Path) -> None:
+    """Emit INSERT statements. The 7-tuple's last element (hs_code) is
+    internal-only and is dropped here — the table schema stays 6-column."""
     path.parent.mkdir(parents=True, exist_ok=True)
     BATCH = 200
 
@@ -356,6 +450,8 @@ def write_sql(rows: list[tuple[str, str, str, str, str, str]], path: Path) -> No
         "-- Each row carries hs_chapter and split inline.\n"
         "-- shipment_id prefix 'v2_' distinguishes generated from legacy rows.\n"
         "-- Multi-label rows share shipment_id across categories.\n"
+        "-- Chapter-locked: no commodity_text spans multiple categories outside\n"
+        "-- the overrides-twin pattern (CCTR P1 invariant).\n"
         "\n"
     )
 
@@ -368,7 +464,7 @@ def write_sql(rows: list[tuple[str, str, str, str, str, str]], path: Path) -> No
                 "(shipment_id, category_name, cargo_text, commodity_text, hs_chapter, split) VALUES\n"
             )
             lines = []
-            for sid, cat, cargo, com, chap, split in batch:
+            for sid, cat, cargo, com, chap, split, _hs in batch:
                 lines.append(
                     f"    ('{sid}', '{cat}', '{_sql_esc(cargo)}', "
                     f"'{_sql_esc(com)}', '{chap}', '{split}')"
@@ -393,11 +489,19 @@ def main() -> int:
     rows = list(iter_rows(hs_rows, chapter_map, overrides, uk_headings))
     print(f"  emitted {len(rows):,} rows")
 
+    # CCTR Commit 2: enforce chapter-lock — no commodity_text may resolve to
+    # multiple categories outside the overrides-twin pattern.
+    print("Chapter-locking commodity_texts...")
+    chapter_titles = {ch: info[1] for ch, info in chapter_map.items()}
+    rows = chapter_lock_rows(rows, chapter_titles)
+    assert_chapter_locked(rows)
+    print("  [ok] chapter-lock invariant holds")
+
     # Summary counts
     by_split: dict[str, int] = defaultdict(int)
     by_cat: dict[str, int]   = defaultdict(int)
     by_chap: dict[str, int]  = defaultdict(int)
-    for sid, cat, cargo, com, chap, split in rows:
+    for sid, cat, cargo, com, chap, split, _hs in rows:
         by_split[split] += 1
         if split == "train":
             by_cat[cat] += 1
@@ -418,7 +522,7 @@ def main() -> int:
     if below:
         print(f"  underfilled: {sorted(below)}")
 
-    print(f"\nWriting SQL → {OUT_SQL}")
+    print(f"\nWriting SQL -> {OUT_SQL}")
     write_sql(rows, OUT_SQL)
     print("Done.")
     return 0

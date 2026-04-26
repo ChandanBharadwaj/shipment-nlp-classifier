@@ -40,9 +40,12 @@ SEEDS: list[Path] = [
     ROOT / "seed" / "seed_categories.sql",       # 20 categories + 96 HS chapter edges
     ROOT / "seed" / "seed_keywords.sql",         # legacy hand-curated keywords
     ROOT / "seed" / "seed_keywords_v2.sql",      # TF-IDF + hand merge (generated)
+    ROOT / "seed" / "seed_anchors.sql",          # CCTR anchors / suppressors / modifiers (per-chapter, signal-class-typed)
+    ROOT / "seed" / "seed_collisions.sql",       # CCTR token-collision registry (polysemy resolution rules)
     ROOT / "seed" / "seed_shipment_labels.sql",  # legacy 1000 labeled rows
     ROOT / "seed" / "seed_splits.sql",           # splits legacy rows only
     ROOT / "seed" / "seed_shipment_labels_v2.sql",  # generated ~15k rows w/ hs_chapter + split
+    ROOT / "seed" / "seed_synthetic_labels.sql", # CCTR hand-curated chapter-locked labels (Commit 6)
     ROOT / "seed" / "seed_confusables.sql",      # hand-curated confusables (train-only)
 ]
 

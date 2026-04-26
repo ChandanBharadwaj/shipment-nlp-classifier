@@ -236,14 +236,18 @@ def normalize(text: str) -> str:
 # downstream callers trim to the 2-digit chapter for category lookup.
 
 # Locate a "HS code: ..." style anchor; used to identify the starting offset.
+# The `h\.s\.?` alternative captures dotted variants like "H.S." / "H.S" /
+# "H.S.CODE" that plain `\bhs\b` can't cross (word boundary fails at the dot).
 _HS_ANCHOR_RE = re.compile(
-    r"\b(?:hs|hts|tariff)\s*(?:code|codes|no|number|#)?\.?\s*:?\s*",
+    r"(?:\bhs\b|\bh\.s\.?|\bhts\b|\btariff\b)\s*(?:code|codes|no|number|#)?\.?\s*:?\s*",
     re.IGNORECASE,
 )
-# Digit runs that look like HS/HTS codes: 6, 8, or 10 digits (WCO HS-6, US
-# HTS-8/10). 4-digit subheadings are too short to disambiguate from phone /
-# invoice fragments; we start at 6 and require the anchor to be nearby.
-_HS_DIGITS_RE = re.compile(r"\b(\d{6}|\d{8}|\d{10})\b")
+# Digit runs that look like HS/HTS codes. Tolerates dots/spaces between digits
+# ("8421.99", "09.01.11.90.00") — separators are stripped before length check.
+# Final code must be 6, 8, or 10 digits (WCO HS-6, US HTS-8/10); 4-digit
+# subheadings are too short to disambiguate from phone / invoice fragments.
+_HS_DIGITS_RE = re.compile(r"(\d(?:[.\s]?\d){5,11})")
+_NON_DIGIT_RE = re.compile(r"\D")
 
 
 @dataclass
@@ -278,12 +282,15 @@ def extract_signals(text: str) -> ExtractedSignals:
     for anchor in _HS_ANCHOR_RE.finditer(s):
         window = s[anchor.end(): anchor.end() + 200]
         # Stop the window at sentence punctuation that would separate sections.
-        split = re.search(r"[.;\n]", window)
+        # A bare `.` isn't enough — dotted codes like "8421.99" and
+        # "09.01.11.90.00" embed periods inside the digit run. Require the
+        # period to be followed by whitespace (true sentence boundary).
+        split = re.search(r"[;\n]|\.\s", window)
         if split:
             window = window[: split.start()]
         for m in _HS_DIGITS_RE.finditer(window):
-            code = m.group(1)
-            if code not in seen:
+            code = _NON_DIGIT_RE.sub("", m.group(1))
+            if len(code) in (6, 8, 10) and code not in seen:
                 seen.add(code)
                 codes.append(code)
 

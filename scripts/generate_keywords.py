@@ -243,7 +243,10 @@ def emit_sql(
             f.write(",\n".join(lines))
             f.write(
                 f"\n) AS t(kw, wt)\nWHERE name = '{cat}'\n"
-                "ON CONFLICT (category_id, keyword) DO NOTHING;\n\n"
+                # Targets the partial index uniq_category_keywords_legacy
+                # (category_id, keyword) WHERE hs_chapter IS NULL, which is
+                # how the CCTR schema preserves pre-migration idempotency.
+                "ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;\n\n"
             )
     return counts
 

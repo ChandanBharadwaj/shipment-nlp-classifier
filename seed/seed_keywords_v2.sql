@@ -105,7 +105,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('wool hair', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'agriculture'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── automotive ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -209,7 +209,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('windshield', 1.00)
 ) AS t(kw, wt)
 WHERE name = 'automotive'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── chemicals ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -317,7 +317,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('un number', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'chemicals'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── construction ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -419,7 +419,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('yarn rovings', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'construction'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── cosmetics ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -522,7 +522,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('waxes like', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'cosmetics'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── defense ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -624,7 +624,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('weapons system', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'defense'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── electronics ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -730,7 +730,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('wireless', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'electronics'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── energy ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -831,7 +831,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('wax', 1.00)
 ) AS t(kw, wt)
 WHERE name = 'energy'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── food_beverages ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -933,7 +933,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('wine', 1.00)
 ) AS t(kw, wt)
 WHERE name = 'food_beverages'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── furniture ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1040,7 +1040,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('woven sheet', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'furniture'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── luxury ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1143,7 +1143,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('wrist watches', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'luxury'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── machinery ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1249,7 +1249,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('working metal', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'machinery'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── metals ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1352,7 +1352,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('zinc', 1.00)
 ) AS t(kw, wt)
 WHERE name = 'metals'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── minerals ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1454,7 +1454,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('zirconium ores', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'minerals'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── paper ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1559,7 +1559,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('writing printing', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'paper'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── perishables ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1651,7 +1651,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('tilapias oreochromis', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'perishables'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── pharmaceuticals ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1759,7 +1759,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('x-ray', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'pharmaceuticals'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── plastics ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1865,7 +1865,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('vulcanized rubber', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'plastics'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── textiles ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -1965,7 +1965,7 @@ SELECT id, kw, wt FROM classification_categories,
     ('yarns colors', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'textiles'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
 -- ── toys ─────────────────────────────────────────────
 INSERT INTO category_keywords (category_id, keyword, weight)
@@ -2073,5 +2073,5 @@ SELECT id, kw, wt FROM classification_categories,
     ('water park', 1.50)
 ) AS t(kw, wt)
 WHERE name = 'toys'
-ON CONFLICT (category_id, keyword) DO NOTHING;
+ON CONFLICT (category_id, keyword) WHERE hs_chapter IS NULL DO NOTHING;
 
