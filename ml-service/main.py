@@ -59,6 +59,10 @@ from config import (
 from compliance import apply_compliance, load_risk_profile, prepare_risk_vectors
 from db import close_pool, pooled_connection
 
+# CCTR admin router — read-only registry browsing + discovery in Commit 2;
+# governed write endpoints land in Commit 6.
+from admin_routes import router as admin_router
+
 # ── App setup ──────────────────────────────────────────────────────────────────
 
 # In-memory state refreshed on /reload
@@ -136,12 +140,61 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Static single-page UI for CSV-upload testing. Stateless — the page never
-# persists results. Mounted at /ui so /classify, /health etc. stay unchanged.
-# `html=True` makes /ui/ serve index.html automatically.
+# /ui/ → the Vue SPA (web/ → built into static/dist/) when it exists,
+# otherwise the legacy vanilla-JS bulk tester living in static/. The
+# fallback keeps /ui/ usable while Commit 3 lands and before anyone
+# runs `npm run build` on this checkout.
+#
+# Vue Router uses HTML5 history mode, so deep links like
+# /ui/admin/tokens/battery must serve the SPA shell. Plain StaticFiles
+# would 404 those (no file at that path) — Starlette mounts win over
+# catch-all routes for any path under the mount, so we subclass
+# StaticFiles to fall back to index.html on 404 instead. Real missing
+# assets (.js, .css, .csv) keep returning 404 because the override
+# only kicks in when path has no extension or matches the SPA shell.
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-if os.path.isdir(_STATIC_DIR):
+_DIST_DIR   = os.path.join(_STATIC_DIR, "dist")
+
+
+class _SPAStaticFiles(StaticFiles):
+    """StaticFiles that serves index.html on 404 for SPA deep links.
+
+    Without this, ``GET /ui/admin/tokens/battery`` returns 404 because
+    the path doesn't map to a file — even though it's a valid Vue
+    Router route. We catch the 404, look at the request path, and:
+      - return index.html if the path doesn't look like an asset
+        (no file extension, or extension is .html);
+      - re-raise the 404 otherwise so genuine missing assets still 404.
+    """
+    async def get_response(self, path: str, scope):
+        from fastapi import HTTPException as _HTTPExc
+        from starlette.exceptions import HTTPException as _StarHTTPExc
+        try:
+            return await super().get_response(path, scope)
+        except (_HTTPExc, _StarHTTPExc) as exc:
+            if exc.status_code != 404:
+                raise
+            # Treat any extension-less path (e.g. /admin/tokens/battery)
+            # as an SPA route. Asset 404s (.js/.css/.json/.csv/...) are
+            # left as-is so build mistakes surface clearly.
+            tail = os.path.basename(path)
+            if "." in tail:
+                raise
+            return await super().get_response("index.html", scope)
+
+
+if os.path.isdir(_DIST_DIR):
+    # Production: serve Vite build output. html=True maps /ui/ → index.html;
+    # _SPAStaticFiles handles everything below it, including deep links.
+    app.mount("/ui", _SPAStaticFiles(directory=_DIST_DIR, html=True), name="ui")
+elif os.path.isdir(_STATIC_DIR):
+    # Legacy fallback (pre-build). The old UI is a single page so the
+    # SPA-fallback subclass would be no-op here, but using it keeps the
+    # behaviour identical regardless of which mode the server boots in.
     app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+
+# /admin/api/* — registry browsing, discovery (Commit 2), governed writes (Commit 6)
+app.include_router(admin_router)
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -443,3 +496,10 @@ def reload() -> dict:
             "total_vectors":          stats.get("total_vectors", 0),
         },
     }
+
+
+# SPA deep-link fallback is handled inside _SPAStaticFiles above so that
+# the StaticFiles mount itself returns index.html on 404 for routes like
+# /ui/admin/tokens/battery. Doing it inside the mount avoids the route
+# vs. mount precedence issue (mounts always win over catch-all routes
+# under the same prefix in Starlette).

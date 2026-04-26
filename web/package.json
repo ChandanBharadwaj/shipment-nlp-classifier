@@ -1,0 +1,26 @@
+{
+  "name": "shipment-classifier-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vue 3 + Vite SPA for the Shipment Classifier admin UI and CSV bulk tester. Mounted by FastAPI at /ui/.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "papaparse": "^5.4.1",
+    "pinia": "^2.2.4",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.3.15",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}
