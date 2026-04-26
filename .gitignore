@@ -46,3 +46,11 @@ pgdata/
 # Large raw HS reference data (re-fetchable via scripts/fetch_public_data.py)
 data/hs/usitc_hts_2024.json
 data/hs/uk_chapters_raw/
+
+# Diagnostics tool backups — rebalance_keyword_weights writes a timestamped
+# CSV of the prior weights before each run so the operator can restore
+# manually. Per-run state, not source.
+ml-service/diagnostics/rebalance_backup_*.csv
+
+# Windows / cygwin crash dumps
+*.stackdump
