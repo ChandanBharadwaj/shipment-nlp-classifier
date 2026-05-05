@@ -13,7 +13,7 @@
 import { useOperatorStore } from "@/stores/operator";
 import type {
   Overview, Category, KeywordPage, KeywordByToken,
-  Collision, AuditPage, DiscoverResult,
+  ChapterRow, LabelPage, CentroidProjection, CentroidAffinity,
 } from "@/types";
 
 const API_PREFIX = "/admin/api";
@@ -75,15 +75,14 @@ export const api = {
   // Admin reads
   overview:    ()                              => request<Overview>("GET",  `${API_PREFIX}/overview`),
   categories:  ()                              => request<Category[]>("GET",  `${API_PREFIX}/categories`),
+  chapters:    ()                              => request<ChapterRow[]>("GET",  `${API_PREFIX}/chapters`),
+  centroids:   ()                              => request<CentroidProjection>("GET",  `${API_PREFIX}/centroids`),
+  labels:      (params: Record<string, unknown> = {}) =>
+                                                 request<LabelPage>("GET",  `${API_PREFIX}/labels`, { params }),
   keywords:    (params: Record<string, unknown> = {}) =>
                                                  request<KeywordPage>("GET",  `${API_PREFIX}/keywords`, { params }),
   keywordByToken: (token: string)              => request<KeywordByToken>("GET",  `${API_PREFIX}/keywords/by-token/${encodeURIComponent(token)}`),
-  collisions:  ()                              => request<Collision[]>("GET",  `${API_PREFIX}/collisions`),
-  collision:   (token: string)                 => request<Collision>("GET",  `${API_PREFIX}/collisions/${encodeURIComponent(token)}`),
-  auditLog:    (params: Record<string, unknown> = {}) =>
-                                                 request<AuditPage>("GET",  `${API_PREFIX}/audit-log`, { params }),
-  discover:    (params: Record<string, unknown> = {}) =>
-                                                 request<DiscoverResult>("POST", `${API_PREFIX}/discover`, { params }),
+  centroidAffinity: (token: string)            => request<CentroidAffinity>("GET",  `${API_PREFIX}/keywords/${encodeURIComponent(token)}/centroid-affinity`),
 
   // Bulk classify (existing endpoint, NOT under /admin)
   classifyBatch: (shipments: unknown[]) =>

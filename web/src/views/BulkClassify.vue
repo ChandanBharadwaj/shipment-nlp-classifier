@@ -13,9 +13,16 @@
  * line-for-line; differences are confined to Vue-isms (refs, reactive
  * state, <CategoryChip>) and have no behavioural effect.
  */
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import Papa from "papaparse";
 import CategoryChip from "@/components/CategoryChip.vue";
+import { useCatalogStore } from "@/stores/catalog";
+
+// Pre-load the catalog so CategoryChip can render display_name (natural
+// language) instead of falling back to the raw slug. Best-effort: if it
+// fails the chips just render slugs, which is the legacy behaviour.
+const catalog = useCatalogStore();
+onMounted(() => { void catalog.ensure(); });
 
 // ── Config ─────────────────────────────────────────────────────────────
 const REQUIRED_COLUMNS = ["shipment_id", "cargo_description", "commodity_description"] as const;

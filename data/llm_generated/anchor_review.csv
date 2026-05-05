@@ -1,0 +1,195 @@
+id,keyword,hs_chapter,signal_class,status,in_own_chapter_source,appears_in_n_chapters,reason
+10034,hatching eggs,01,anchor,flagged,False,0,not_in_any_source_text
+10033,horses for export,01,anchor,flagged,False,0,not_in_any_source_text
+10030,livestock,01,anchor,review,False,1,in_other_chapters:23
+10041,chicken carcass,02,anchor,flagged,False,0,not_in_any_source_text
+10040,frozen meat,02,anchor,flagged,False,0,not_in_any_source_text
+10038,pork,02,anchor,review,False,1,in_other_chapters:16
+10046,fresh fish,03,anchor,flagged,False,0,not_in_any_source_text
+10047,frozen fish,03,anchor,flagged,False,0,not_in_any_source_text
+10064,animal hair,05,anchor,review,False,16,"in_other_chapters:51,52,53,54,55"
+10069,seedlings,06,anchor,flagged,False,0,not_in_any_source_text
+10071,tree saplings,06,anchor,flagged,False,0,not_in_any_source_text
+10076,fresh vegetables,07,anchor,flagged,False,0,not_in_any_source_text
+10079,fresh fruit,08,anchor,flagged,False,0,not_in_any_source_text
+10096,black pepper,09,anchor,review,False,1,in_other_chapters:33
+10087,coffee beans,09,anchor,flagged,False,0,not_in_any_source_text
+10088,instant coffee,09,anchor,review,False,1,in_other_chapters:21
+10110,corn starch,11,anchor,flagged,False,0,not_in_any_source_text
+10115,cottonseed,12,anchor,review,False,1,in_other_chapters:15
+10117,natural resin,13,anchor,review,False,1,in_other_chapters:96
+10118,vegetable extract,13,anchor,flagged,False,0,not_in_any_source_text
+10121,vegetable fibre,14,anchor,review,False,1,in_other_chapters:68
+10126,coconut oil,15,anchor,flagged,False,0,not_in_any_source_text
+10125,sunflower oil,15,anchor,flagged,False,0,not_in_any_source_text
+10130,canned sardines,16,anchor,flagged,False,0,not_in_any_source_text
+10129,canned tuna,16,anchor,flagged,False,0,not_in_any_source_text
+10133,prepared meat,16,anchor,flagged,False,0,not_in_any_source_text
+10132,sausages canned,16,anchor,flagged,False,0,not_in_any_source_text
+10139,candy,17,anchor,review,False,4,"in_other_chapters:18,44,69,84"
+10136,refined sugar,17,anchor,flagged,False,0,not_in_any_source_text
+10149,breakfast cereal,19,anchor,flagged,False,0,not_in_any_source_text
+10150,canned vegetables,20,anchor,flagged,False,0,not_in_any_source_text
+10153,frozen vegetables,20,anchor,flagged,False,0,not_in_any_source_text
+10154,pickles,20,anchor,flagged,False,0,not_in_any_source_text
+10158,instant noodles,21,anchor,flagged,False,0,not_in_any_source_text
+10159,protein powder,21,anchor,flagged,False,0,not_in_any_source_text
+10157,soup mix,21,anchor,flagged,False,0,not_in_any_source_text
+10165,bottled water,22,anchor,flagged,False,0,not_in_any_source_text
+10162,whisky,22,anchor,flagged,False,0,not_in_any_source_text
+10170,fish meal,23,anchor,flagged,False,0,not_in_any_source_text
+10171,oil cake,23,anchor,flagged,False,0,not_in_any_source_text
+10176,nicotine pouches,24,anchor,flagged,False,0,not_in_any_source_text
+10175,tobacco leaves,24,anchor,flagged,False,0,not_in_any_source_text
+10177,vape liquid,24,anchor,flagged,False,0,not_in_any_source_text
+10187,coal slag,26,anchor,flagged,False,0,not_in_any_source_text
+10188,mineral ore,26,anchor,flagged,False,0,not_in_any_source_text
+10189,crude oil,27,anchor,review,False,1,in_other_chapters:15
+10206,ethanol industrial,29,anchor,flagged,False,0,not_in_any_source_text
+10208,glycerin,29,anchor,flagged,False,0,not_in_any_source_text
+10216,capsules,30,anchor,review,False,3,"in_other_chapters:19,83,96"
+10213,medicines,30,anchor,flagged,False,0,not_in_any_source_text
+10222,syringe sterile,30,anchor,flagged,False,0,not_in_any_source_text
+10215,tablets,30,anchor,review,False,2,"in_other_chapters:31,32"
+10227,nitrogen fertilizer,31,anchor,flagged,False,0,not_in_any_source_text
+10228,phosphate fertilizer,31,anchor,flagged,False,0,not_in_any_source_text
+10226,potash,31,anchor,review,False,1,in_other_chapters:28
+10242,cologne,33,anchor,flagged,False,0,not_in_any_source_text
+10237,cosmetics,33,anchor,review,False,1,in_other_chapters:96
+10241,fragrance,33,anchor,flagged,False,0,not_in_any_source_text
+10239,lipstick,33,anchor,flagged,False,0,not_in_any_source_text
+10240,mascara,33,anchor,flagged,False,0,not_in_any_source_text
+10246,laundry detergent,34,anchor,flagged,False,0,not_in_any_source_text
+10245,shampoo,34,anchor,review,False,1,in_other_chapters:33
+10247,washing powder,34,anchor,flagged,False,0,not_in_any_source_text
+10249,wax polish,34,anchor,flagged,False,0,not_in_any_source_text
+10263,x-ray film,37,anchor,flagged,False,0,not_in_any_source_text
+10265,industrial chemical,38,anchor,flagged,False,0,not_in_any_source_text
+10268,laboratory chemical,38,anchor,flagged,False,0,not_in_any_source_text
+10273,plastic bag,39,anchor,flagged,False,0,not_in_any_source_text
+10274,plastic pellets,39,anchor,flagged,False,0,not_in_any_source_text
+10272,pvc,39,anchor,flagged,False,0,not_in_any_source_text
+10281,rubber gloves,40,anchor,flagged,False,0,not_in_any_source_text
+10287,cattle hide,41,anchor,flagged,False,0,not_in_any_source_text
+10285,rawhide,41,anchor,flagged,False,0,not_in_any_source_text
+10288,sheep skin,41,anchor,flagged,False,0,not_in_any_source_text
+10289,tanned leather,41,anchor,flagged,False,0,not_in_any_source_text
+10293,leather belt,42,anchor,flagged,False,0,not_in_any_source_text
+10295,leather goods,42,anchor,review,False,1,in_other_chapters:83
+10291,leather wallet,42,anchor,flagged,False,0,not_in_any_source_text
+10296,fur coat,43,anchor,flagged,False,0,not_in_any_source_text
+10300,fur trim,43,anchor,flagged,False,0,not_in_any_source_text
+10309,fuelwood,44,anchor,flagged,False,0,not_in_any_source_text
+10306,sawn wood,44,anchor,flagged,False,0,not_in_any_source_text
+10311,cork stopper,45,anchor,flagged,False,0,not_in_any_source_text
+10316,bamboo basket,46,anchor,flagged,False,0,not_in_any_source_text
+10315,straw mat,46,anchor,flagged,False,0,not_in_any_source_text
+10318,paper pulp,47,anchor,review,False,3,"in_other_chapters:48,84,96"
+10319,recovered paper,47,anchor,flagged,False,0,not_in_any_source_text
+10320,waste paper,47,anchor,flagged,False,0,not_in_any_source_text
+10323,cardboard,48,anchor,flagged,False,0,not_in_any_source_text
+10332,greeting cards,49,anchor,flagged,False,0,not_in_any_source_text
+10329,magazines,49,anchor,flagged,False,0,not_in_any_source_text
+10337,silk fabric,50,anchor,flagged,False,0,not_in_any_source_text
+10340,raw wool,51,anchor,flagged,False,0,not_in_any_source_text
+10346,cotton fabric,52,anchor,flagged,False,0,not_in_any_source_text
+10347,cotton thread,52,anchor,flagged,False,0,not_in_any_source_text
+10344,raw cotton,52,anchor,flagged,False,0,not_in_any_source_text
+10350,hemp fibre,53,anchor,flagged,False,0,not_in_any_source_text
+10351,sisal,53,anchor,review,False,1,in_other_chapters:56
+10353,nylon filament,54,anchor,flagged,False,0,not_in_any_source_text
+10355,synthetic yarn,54,anchor,flagged,False,0,not_in_any_source_text
+10357,acrylic fibre,55,anchor,flagged,False,0,not_in_any_source_text
+10359,nonwoven fabric,56,anchor,flagged,False,0,not_in_any_source_text
+10367,oriental rug,57,anchor,flagged,False,0,not_in_any_source_text
+10371,woven trim,58,anchor,flagged,False,0,not_in_any_source_text
+10373,coated fabric,59,anchor,flagged,False,0,not_in_any_source_text
+10372,tarpaulin,59,anchor,review,False,1,in_other_chapters:63
+10378,crochet fabric,60,anchor,flagged,False,0,not_in_any_source_text
+10377,jersey fabric,60,anchor,flagged,False,0,not_in_any_source_text
+10376,knitted fabric,60,anchor,flagged,False,0,not_in_any_source_text
+10383,knit dress,61,anchor,flagged,False,0,not_in_any_source_text
+10380,knit sweater,61,anchor,flagged,False,0,not_in_any_source_text
+10381,knitted apparel,61,anchor,flagged,False,0,not_in_any_source_text
+10382,polo shirt,61,anchor,flagged,False,0,not_in_any_source_text
+10384,business suit,62,anchor,flagged,False,0,not_in_any_source_text
+10388,jeans,62,anchor,flagged,False,0,not_in_any_source_text
+10391,bedsheet,63,anchor,review,False,1,in_other_chapters:48
+10396,used clothing,63,anchor,flagged,False,0,not_in_any_source_text
+10403,athletic shoes,64,anchor,flagged,False,0,not_in_any_source_text
+10400,sneakers,64,anchor,flagged,False,0,not_in_any_source_text
+10410,walking cane,66,anchor,flagged,False,0,not_in_any_source_text
+10414,artificial eyelashes,67,anchor,flagged,False,0,not_in_any_source_text
+10416,granite slab,68,anchor,flagged,False,0,not_in_any_source_text
+10415,marble tile,68,anchor,flagged,False,0,not_in_any_source_text
+10418,mica products,68,anchor,flagged,False,0,not_in_any_source_text
+10419,stone article,68,anchor,flagged,False,0,not_in_any_source_text
+10423,sanitary ware,69,anchor,review,False,7,"in_other_chapters:39,71,73,74,76"
+10427,glass bottle,70,anchor,flagged,False,0,not_in_any_source_text
+10429,laboratory glass,70,anchor,flagged,False,0,not_in_any_source_text
+10428,window glass,70,anchor,flagged,False,0,not_in_any_source_text
+10443,steel bars,72,anchor,flagged,False,0,not_in_any_source_text
+10444,steel coils,72,anchor,flagged,False,0,not_in_any_source_text
+10446,steel ingot,72,anchor,review,False,1,in_other_chapters:84
+10450,iron container,73,anchor,flagged,False,0,not_in_any_source_text
+10451,steel structure,73,anchor,flagged,False,0,not_in_any_source_text
+10457,copper cathode,74,anchor,flagged,False,0,not_in_any_source_text
+10465,aluminium sheet,76,anchor,flagged,False,0,not_in_any_source_text
+10467,lead ingot,78,anchor,flagged,False,0,not_in_any_source_text
+10470,galvanised,79,anchor,flagged,False,0,not_in_any_source_text
+10472,tinfoil,80,anchor,flagged,False,0,not_in_any_source_text
+10473,tin ingot,80,anchor,flagged,False,0,not_in_any_source_text
+10477,titanium metal,81,anchor,flagged,False,0,not_in_any_source_text
+10489,brass hardware,83,anchor,flagged,False,0,not_in_any_source_text
+10488,metal fittings,83,anchor,flagged,False,0,not_in_any_source_text
+10497,industrial machine parts,84,anchor,flagged,False,0,not_in_any_source_text
+10491,industrial machinery,84,anchor,flagged,False,0,not_in_any_source_text
+10495,industrial pump,84,anchor,flagged,False,0,not_in_any_source_text
+10507,electrical motor,85,anchor,flagged,False,0,not_in_any_source_text
+10504,electronics,85,anchor,review,False,1,in_other_chapters:38
+10502,laptop,85,anchor,flagged,False,0,not_in_any_source_text
+10511,li-ion battery,85,anchor,flagged,False,0,not_in_any_source_text
+10510,lithium-ion battery,85,anchor,flagged,False,0,not_in_any_source_text
+10509,wifi router,85,anchor,flagged,False,0,not_in_any_source_text
+10518,rail wagon,86,anchor,flagged,False,0,not_in_any_source_text
+10517,railway carriage,86,anchor,flagged,False,0,not_in_any_source_text
+10520,railway signal,86,anchor,flagged,False,0,not_in_any_source_text
+10519,railway track,86,anchor,flagged,False,0,not_in_any_source_text
+10529,brake pads,87,anchor,flagged,False,0,not_in_any_source_text
+10528,car parts,87,anchor,flagged,False,0,not_in_any_source_text
+10521,passenger car,87,anchor,flagged,False,0,not_in_any_source_text
+10522,sedan,87,anchor,flagged,False,0,not_in_any_source_text
+10523,suv,87,anchor,flagged,False,0,not_in_any_source_text
+10532,airplane parts,88,anchor,flagged,False,0,not_in_any_source_text
+10537,drone,88,anchor,flagged,False,0,not_in_any_source_text
+10534,jet engine,88,anchor,review,False,1,in_other_chapters:84
+10542,floating platform,89,anchor,flagged,False,0,not_in_any_source_text
+10543,marine vessel,89,anchor,flagged,False,0,not_in_any_source_text
+10545,medical device,90,anchor,flagged,False,0,not_in_any_source_text
+10552,prosthesis,90,anchor,flagged,False,0,not_in_any_source_text
+10547,x-ray machine,90,anchor,flagged,False,0,not_in_any_source_text
+10556,clock parts,91,anchor,flagged,False,0,not_in_any_source_text
+10565,5.56mm,93,anchor,flagged,False,0,not_in_any_source_text
+10566,9mm rounds,93,anchor,flagged,False,0,not_in_any_source_text
+10563,ak-47,93,anchor,flagged,False,0,not_in_any_source_text
+10569,artillery shell,93,anchor,flagged,False,0,not_in_any_source_text
+10567,assault rifle,93,anchor,flagged,False,0,not_in_any_source_text
+10568,handgun,93,anchor,flagged,False,0,not_in_any_source_text
+10562,m16 rifle,93,anchor,flagged,False,0,not_in_any_source_text
+10580,led lamp,94,anchor,flagged,False,0,not_in_any_source_text
+10581,lighting fixture,94,anchor,flagged,False,0,not_in_any_source_text
+10575,office chair,94,anchor,flagged,False,0,not_in_any_source_text
+10579,wardrobe,94,anchor,flagged,False,0,not_in_any_source_text
+10584,board game,95,anchor,flagged,False,0,not_in_any_source_text
+10582,plush toy,95,anchor,flagged,False,0,not_in_any_source_text
+10587,sports equipment,95,anchor,flagged,False,0,not_in_any_source_text
+10593,zip fastener,96,anchor,flagged,False,0,not_in_any_source_text
+10603,artwork,97,anchor,flagged,False,0,not_in_any_source_text
+10602,collector items,97,anchor,flagged,False,0,not_in_any_source_text
+10604,original artwork,97,anchor,flagged,False,0,not_in_any_source_text
+10500,industrial,84,modifier,review,,,circular_routing_to_own_chapter
+10514,android,85,modifier,review,,,circular_routing_to_own_chapter
+10512,li-ion,85,modifier,review,,,circular_routing_to_own_chapter
+10513,lithium-ion,85,modifier,review,,,circular_routing_to_own_chapter
+10515,wireless,85,modifier,review,,,circular_routing_to_own_chapter
+10530,lead-acid,87,modifier,review,,,circular_routing_to_own_chapter

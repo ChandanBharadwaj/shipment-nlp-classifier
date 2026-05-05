@@ -59,6 +59,90 @@ export interface Category {
   chapters:         CategoryChapter[];
 }
 
+// ── Chapters (flat HS-chapter list with rollups) ─────────────────────────
+
+export interface ChapterRow {
+  hs_chapter:       string;
+  chapter_title:    string;
+  is_primary:       boolean;
+  category_id:      number;
+  category_name:    string;
+  keyword_count:    number;
+  label_count:      number;
+  centroid_present: boolean;
+  sample_count:     number | null;
+}
+
+// ── Labels ───────────────────────────────────────────────────────────────
+
+export type LabelSplit = "train" | "validation" | "test";
+
+export interface LabelRow {
+  id:                 number;
+  shipment_id:        string;
+  category_name:      string;        // ground truth
+  predicted_category: string | null; // classifier output; null when the input failed quality gates
+  cargo_text:         string;
+  commodity_text:     string;
+  hs_chapter:         string | null;
+  split:              LabelSplit;
+}
+
+export interface LabelPage {
+  rows:   LabelRow[];
+  total:  number;
+  limit:  number;
+  offset: number;
+}
+
+// ── Centroids (UMAP/PCA projection) ──────────────────────────────────────
+
+export interface CentroidPoint {
+  category_id:   number;
+  category_name: string;
+  hs_chapter:    string;
+  chapter_title: string;
+  sample_count:  number;
+  x:             number;
+  y:             number;
+}
+
+export interface CentroidProjection {
+  generated_at: string;
+  reducer:      "umap" | "tsne" | "pca";
+  points:       CentroidPoint[];
+}
+
+/**
+ * One row of /admin/api/keywords/{token}/centroid-affinity — the cosine
+ * score between the token's embedding and a single (category, chapter)
+ * centroid, plus whether the registry already has a row there.
+ */
+export interface CentroidAffinityRow {
+  category_id:      number;
+  category_name:    string;
+  hs_chapter:       string;
+  chapter_title:    string;
+  sample_count:     number;
+  cosine:           number;          // [-1, 1]; embeddings are L2-normalized
+  has_registry_row: boolean;
+  registry_weight:  number | null;   // populated iff has_registry_row
+  signal_class:     string | null;   // anchor|signal|suppressor|modifier of the winning row, or null
+}
+
+/**
+ * Response shape of /admin/api/keywords/{token}/centroid-affinity. The
+ * `point` field is the keyword's coordinates in the same UMAP/PCA space
+ * as /admin/api/centroids — overlay it on that scatter directly.
+ */
+export interface CentroidAffinity {
+  token:         string;
+  embedding_dim: number;
+  reducer:       "umap" | "pca";
+  point:         { x: number; y: number };
+  similarities:  CentroidAffinityRow[];   // pre-sorted desc by cosine
+}
+
 // ── Keywords ─────────────────────────────────────────────────────────────
 
 export interface KeywordRow {
@@ -86,65 +170,6 @@ export interface KeywordByToken {
   rows:  KeywordRow[];
 }
 
-// ── Collisions ───────────────────────────────────────────────────────────
-
-export interface ResolutionArm {
-  if?:   string;
-  then?: string;
-  // Forward-compat: registry may grow extra keys. The UI renders any
-  // `if`/`then` pair and shows the rest in a tooltip.
-  [k: string]: string | undefined;
-}
-
-export interface Collision {
-  id:             number;
-  token:          string;
-  home_chapters:  string[];
-  risk_tier:      RiskTier;
-  resolution:     ResolutionArm[];
-  owner:          string | null;
-  test_case:      string | null;
-  notes:          string | null;
-  created_at:     string | null;
-}
-
-// ── Audit log ────────────────────────────────────────────────────────────
-
-export interface AuditEntry {
-  id:         number;
-  ts:         string;
-  table_name: string;
-  pk:         string | null;
-  operation:  AuditOp;
-  actor:      string;
-  ticket:     string | null;
-  reason:     string | null;
-  before:     unknown;
-  after:      unknown;
-}
-
-export interface AuditPage {
-  rows:   AuditEntry[];
-  total:  number;
-  limit:  number;
-  offset: number;
-}
-
-// ── Discover ─────────────────────────────────────────────────────────────
-
-export interface DiscoverCandidate {
-  keyword:        string;
-  n_chapters:     number;
-  home_chapters:  string;       // comma-separated
-  categories:     string;       // comma-separated
-  max_weight:     string;
-  n_rows:         number;
-  suggested_tier: RiskTier;
-}
-
-export interface DiscoverResult {
-  candidates:           DiscoverCandidate[];
-  n_already_registered: number;
-  min_chapters:         number;
-  min_weight:           number;
-}
+// v3 removed: Collision, AuditEntry, DiscoverCandidate types — those backed
+// the manual collision registry, governed audit log, and discovery scan
+// views, which don't apply to the source-driven pipeline.

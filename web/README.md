@@ -1,11 +1,16 @@
 # web/ — Vue 3 admin SPA
 
 Vue 3 + Vite + TypeScript single-page app served by FastAPI at `/ui/`.
+Read-only inspector for the v3 classifier's data layer.
 
-The app contains two halves on one shell:
+## Pages
 
-- **Bulk Classify** — drop a CSV, hit `/classify/batch`, see results (1:1 port of the legacy `ml-service/static/app.js`).
-- **Admin** — Overview / Browse / Tokens / Collisions / Audit Log / Discover, all backed by `ml-service/admin_routes.py` (`/admin/api/*`). The non-classify views are stubbed in this commit and filled in by Commits 4–6 of the rollout plan.
+- **Bulk Classify** — drop a CSV, hit `/classify/batch`, view results.
+- **Overview** — counts of keywords by signal_class / category / chapter, top polysemous tokens.
+- **Browse** — categories ↔ chapters tree.
+- **Tokens** — paginated keyword list with filters.
+- **Labels** — 15K eval labels with predictions side-by-side.
+- **Centroids** — UMAP scatter of (category, chapter) centroids.
 
 ## Quick start
 
@@ -15,7 +20,7 @@ cd web
 npm install
 
 # 2. run the FastAPI backend in another shell (port 8000)
-cd ../ml-service && uvicorn main:app --reload
+cd ../ml-service && venv/Scripts/uvicorn main:app --port 8000
 
 # 3. dev server with HMR (proxies /admin /classify /health to :8000)
 npm run dev
@@ -30,28 +35,38 @@ npm run build
 # → emits ../ml-service/static/dist/
 ```
 
-FastAPI's `main.py` serves `static/dist/` at `/ui/` when present and falls back to the legacy `static/` directory otherwise. After `npm run build` the SPA replaces the old vanilla-JS tester transparently — no FastAPI restart required during dev (StaticFiles re-reads on every request).
+FastAPI's `main.py` serves `static/dist/` at `/ui/` when present. After
+`npm run build` the SPA is live; no FastAPI restart needed.
 
 ## Layout
 
 ```
 web/
-├── index.html               # Vite shell — single <div id="app"/>
-├── vite.config.ts           # outDir → ../ml-service/static/dist; dev proxy
-├── public/sample.csv        # served at /ui/sample.csv (download link)
+├── index.html               Vite shell — single <div id="app"/>
+├── vite.config.ts           outDir → ../ml-service/static/dist; dev proxy
+├── public/sample.csv        served at /ui/sample.csv (download link)
 └── src/
-    ├── main.ts              # createApp + Pinia + Router
-    ├── App.vue              # topbar + sidebar + <RouterView/>
-    ├── router.ts            # all routes, history mode
-    ├── api.ts               # fetch wrapper, ApiError, actor injection
-    ├── stores/              # operator, toast, (catalog later)
-    ├── styles/              # tokens.css + base.css (no UI lib)
-    ├── components/          # CategoryChip, more later
-    └── views/               # BulkClassify, ComingSoon (Overview/etc. follow)
+    ├── main.ts              createApp + Pinia + Router
+    ├── App.vue              topbar + sidebar + <RouterView/>
+    ├── router.ts            routes (history mode)
+    ├── api.ts               fetch wrapper, ApiError, actor injection
+    ├── stores/              operator, toast, catalog
+    ├── styles/              tokens.css + base.css (no UI lib)
+    ├── charts/palette.ts    36-color v3 category palette
+    ├── components/          CategoryChip, DataTable, FilterBar, …
+    └── views/               BulkClassify, Overview, Browse, Tokens, TokenDetail, Labels, Centroids
 ```
+
+## v3 changes from earlier versions
+
+- Removed `Collisions`, `AuditLog`, `Discover` views — those backed
+  manual-curation flows that don't exist in the source-driven pipeline.
+- Removed write endpoints (no CCTR mutations through the SPA).
+- Palette regenerated for 36 LLM-derived categories (was 20 hard-coded).
+- `CategoryChip` uses `display_name` from the catalog store, not raw slug.
 
 ## Operator identity
 
-Every governed write to `category_keywords` or `token_collisions` must carry an `actor` so it can be stamped into `keyword_audit_log`. The SPA persists the operator name in `localStorage.adminOperator` and prompts on first load. Click the chip in the topbar to change.
-
-This is **not** authentication — it mirrors the `--actor` flag on `apply_collision_change.py`. The service stays on a trusted network for now.
+The topbar chip stores an operator name in `localStorage.adminOperator`.
+This was used by the legacy write endpoints to stamp `keyword_audit_log`
+entries; v3 has no writes so the chip is currently decorative.

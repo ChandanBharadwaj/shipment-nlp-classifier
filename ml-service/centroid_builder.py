@@ -1,41 +1,28 @@
 """
-Offline centroid builder — supervised per-chapter centroids.
+Offline centroid builder — v3 source-driven centroids.
 
-Reads labeled shipments from `shipment_labels` (split='train'), embeds their
-text using the configured sentence-transformer, and produces ONE centroid per
-(category, hs_chapter) pair — roughly 96 centroids across 20 categories.
+Reads `public_source_descriptions` (USITC + UK Trade Tariff), groups by the
+LLM-derived (category, hs_chapter) map, embeds with the configured
+SentenceTransformer, and writes ONE L2-normalized centroid per
+(category_slug, hs_chapter) into `category_centroids`.
 
-Why per-chapter instead of k-means:
-    The prior version ran k-means inside each category to split heterogeneous
-    ones (machinery spanning pumps / compressors / CNC tools). Clusters were
-    unsupervised and drifted into neighboring categories' topic space.
-
-    Now that every v2 training row carries its source `hs_chapter` (2-digit
-    HS code), we have labeled clusters for free. Chapter 84 (machinery) still
-    gets sub-clusters — one each for heading-groups like pumps (8413),
-    compressors (8414), CNC (8456-8466) — but each is supervised by the HS
-    hierarchy rather than k-means geometry.
-
-    Single-chapter categories (cosmetics=33, automotive=87, defense=93,
-    energy=27, minerals=26) naturally produce one centroid.
-
-Legacy rows:
-    Legacy rows (shipment_id matching the xx_### pattern) have hs_chapter=NULL.
-    They're assigned to the PRIMARY chapter of their coarse category — looked
-    up from `category_hs_chapters` where `is_primary = true`. This keeps
-    legacy samples contributing signal without a special code path at
-    inference time.
+shipment_labels is NOT used here — it stays as the F1 evaluation set only.
 
 Configuration:
-    EMBEDDING_MODEL env var — defaults to all-MiniLM-L6-v2 (384-dim). Must
+    EMBEDDING_MODEL env var (defaults to all-MiniLM-L6-v2, 384-dim). Must
     match what the API service uses at inference time.
 
 Run:
-    python centroid_builder.py
+    python ml-service/centroid_builder.py
 
 Schedule:
-    After any data change: init_db.py → centroid_builder.py → fit_calibration.py.
-    Then POST /reload on the API so the new centroids load without a restart.
+    After any pipeline data change:
+        scripts/load_public_sources.py
+        scripts/load_llm_categories.py
+        scripts/build_public_keywords.py
+        scripts/validate_chat_cctr.py
+        ml-service/centroid_builder.py
+        curl -X POST http://localhost:8000/reload
 """
 
 from __future__ import annotations
@@ -55,101 +42,87 @@ MIN_SAMPLES_PER_CHAPTER = 3   # below this we warn but still build a centroid
 
 
 # ── Queries ────────────────────────────────────────────────────────────────────
-
-# Pull every train-split row for a category plus its hs_chapter.
-# Legacy rows (hs_chapter IS NULL) are re-labeled downstream to the category's
-# primary chapter so they feed into the main centroid.
-TRAIN_ROWS_QUERY = """
-    SELECT sl.shipment_id,
-           sl.cargo_text,
-           sl.commodity_text,
-           sl.hs_chapter
-    FROM   shipment_labels sl
-    JOIN   classification_categories cc ON cc.name = sl.category_name
-    WHERE  cc.is_active = true
-      AND  sl.category_name = %s
-      AND  sl.split = 'train'
-"""
-
-PRIMARY_CHAPTER_QUERY = """
-    SELECT cc.name, chc.hs_chapter
-    FROM   category_hs_chapters chc
-    JOIN   classification_categories cc ON cc.id = chc.category_id
-    WHERE  chc.is_primary = true
+# Categories come from `categories`/`chapter_categories` (LLM-derived).
+# Reference text comes from `public_source_descriptions` (USITC + UK).
+# shipment_labels is NOT used here — it stays as the F1 evaluation set only.
+PUBLIC_TEXT_QUERY = """
+    SELECT cm.category_slug,
+           p.hs_chapter,
+           p.description
+    FROM   public_source_descriptions p
+    JOIN   chapter_categories cm USING (hs_chapter)
+    ORDER  BY cm.category_slug, p.hs_chapter
 """
 
 ALL_CHAPTERS_QUERY = """
-    SELECT cc.name, chc.hs_chapter
-    FROM   category_hs_chapters chc
-    JOIN   classification_categories cc ON cc.id = chc.category_id
-    WHERE  cc.is_active = true
-    ORDER  BY cc.name, chc.hs_chapter
+    SELECT cc.category_slug, cc.hs_chapter
+    FROM   chapter_categories cc
+    ORDER  BY cc.category_slug, cc.hs_chapter
 """
 
 
-def _load_primary_chapters(conn) -> dict[str, str]:
-    """{category_name: primary_hs_chapter} — one row per category."""
-    out: dict[str, str] = {}
-    with conn.cursor() as cur:
-        cur.execute(PRIMARY_CHAPTER_QUERY)
-        for name, hs_chapter in cur.fetchall():
-            out[name] = hs_chapter
-    return out
-
-
 def _load_category_chapters(conn) -> dict[str, list[str]]:
-    """{category_name: [hs_chapter, ...]} — every edge in the taxonomy."""
+    """{category_slug: [hs_chapter, ...]} v3 taxonomy edges."""
     out: dict[str, list[str]] = defaultdict(list)
     with conn.cursor() as cur:
         cur.execute(ALL_CHAPTERS_QUERY)
-        for name, hs_chapter in cur.fetchall():
-            out[name].append(hs_chapter)
+        for slug, hs_chapter in cur.fetchall():
+            out[slug].append(hs_chapter)
     return dict(out)
+
+
+def _load_public_text(conn) -> dict[str, dict[str, list[str]]]:
+    """{category_slug: {hs_chapter: [description, ...]}} from
+    public_source_descriptions, deduped per chapter to avoid parent-context
+    rollup inflating the average (a 4-digit heading's text appears verbatim
+    inside many child rows)."""
+    out: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
+    with conn.cursor() as cur:
+        cur.execute(PUBLIC_TEXT_QUERY)
+        for slug, ch, descr in cur.fetchall():
+            out[slug][ch].add(descr)
+    return {slug: {ch: sorted(s) for ch, s in by_ch.items()}
+            for slug, by_ch in out.items()}
 
 
 def build_and_persist(conn) -> None:
     """
-    Build one centroid per (category, hs_chapter) and UPSERT into
-    category_centroids. Wipe-and-rebuild semantics so stale chapters from a
-    prior taxonomy version don't linger.
+    Build one centroid per (category, hs_chapter) from public reference
+    text and UPSERT into category_centroids. Wipe-and-rebuild semantics.
     """
-    primary_by_cat = _load_primary_chapters(conn)
     chapters_by_cat = _load_category_chapters(conn)
+    text_by_cat = _load_public_text(conn)
 
     if not chapters_by_cat:
-        print("No category_hs_chapters rows found. Run init_db.py first.")
+        print("No chapter_categories rows. Run scripts/load_llm_categories.py first.")
+        return
+    if not text_by_cat:
+        print("No public_source_descriptions. Run scripts/load_public_sources.py first.")
         return
 
-    print(f"Building supervised per-chapter centroids for {len(chapters_by_cat)} categories...")
+    print(f"Building per-chapter centroids from public source text "
+          f"({len(chapters_by_cat)} categories)...")
     model_name = (
         model._first_module().auto_model.config.name_or_path
         if hasattr(model, "_first_module") else "unknown"
     )
     print(f"Model: {model_name}")
 
-    # [(category_name, hs_chapter, centroid_vec, sample_count), ...]
+    # [(category_slug, hs_chapter, centroid_vec, sample_count), ...]
     to_upsert: list[tuple[str, str, list, int]] = []
 
     for category in sorted(chapters_by_cat.keys()):
-        with conn.cursor() as cur:
-            cur.execute(TRAIN_ROWS_QUERY, (category,))
-            rows = cur.fetchall()
-
-        if not rows:
-            print(f"  [{category}] WARNING: no train rows — skipping.")
+        buckets_dict = text_by_cat.get(category, {})
+        if not buckets_dict:
+            print(f"  [{category}] WARNING: no public text -- skipping.")
             continue
 
-        # Bucket rows by chapter. Legacy rows (hs_chapter NULL) fall into the
-        # category's primary chapter.
-        primary = primary_by_cat.get(category)
-        if primary is None:
-            # Should not happen if seed_categories.sql marked one chapter primary.
-            primary = chapters_by_cat[category][0]
-
-        buckets: dict[str, list[tuple[str, str]]] = defaultdict(list)
-        for _sid, cargo, commodity, hs_chapter in rows:
-            bucket = hs_chapter if hs_chapter else primary
-            buckets[bucket].append((cargo, commodity))
+        # Convert into the same shape the rest of the function expects:
+        # buckets[hs_chapter] = [(cargo, commodity), ...]. We treat each
+        # description as cargo_text with empty commodity_text.
+        buckets: dict[str, list[tuple[str, str]]] = {}
+        for chap, descriptions in buckets_dict.items():
+            buckets[chap] = [(d, "") for d in descriptions]
 
         # Batch-embed all rows for this category once (fewer model calls).
         all_texts: list[str] = []
@@ -180,7 +153,8 @@ def build_and_persist(conn) -> None:
         missing = sorted(assigned - seen)
 
         sizes_str = " ".join(f"{c}={n}" for c, n in bucket_sizes)
-        print(f"  [{category}] {len(rows)} samples → {len(buckets)} chapters  {sizes_str}")
+        total_samples = sum(n for _, n in bucket_sizes)
+        print(f"  [{category}] {total_samples} samples -> {len(buckets)} chapters  {sizes_str}")
         if missing:
             print(f"    MISSING (assigned, no train data): {missing}")
 
@@ -196,14 +170,12 @@ def build_and_persist(conn) -> None:
     # removed from a category must not leave stale rows behind.
     with conn.cursor() as cur:
         cur.execute("DELETE FROM category_centroids")
-        for category, hs_chapter, centroid, sample_count in to_upsert:
+        for category_slug, hs_chapter, centroid, sample_count in to_upsert:
             cur.execute("""
                 INSERT INTO category_centroids
-                    (category_id, hs_chapter, cluster_id, centroid, sample_count, updated_at)
-                SELECT id, %s, 0, %s, %s, now()
-                FROM   classification_categories
-                WHERE  name = %s
-            """, (hs_chapter, centroid, sample_count, category))
+                    (category_slug, hs_chapter, centroid, sample_count, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+            """, (category_slug, hs_chapter, centroid, sample_count))
     conn.commit()
 
     n_categories = len({row[0] for row in to_upsert})

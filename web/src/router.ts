@@ -9,11 +9,8 @@
 // without conditional code.
 import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
 
-// Lazy chunks per view. Bulk Classify is the only fully-built view in
-// Commit 3; the other entries are placeholders that resolve to a shared
-// ComingSoon stub until Commits 4–6 land their real implementations.
-const ComingSoon = () => import("@/views/ComingSoon.vue");
-
+// Lazy chunks per view. Each route loads its own component bundle so
+// we don't pay for unused views on first paint.
 const routes: RouteRecordRaw[] = [
   { path: "/",          redirect: "/classify" },
   {
@@ -25,44 +22,41 @@ const routes: RouteRecordRaw[] = [
   {
     path: "/admin/overview",
     name: "overview",
-    component: ComingSoon,
+    component: () => import("@/views/Overview.vue"),
     meta: { title: "Overview" },
   },
   {
     path: "/admin/browse",
     name: "browse",
-    component: ComingSoon,
+    component: () => import("@/views/Browse.vue"),
     meta: { title: "Browse" },
   },
   {
     path: "/admin/tokens",
     name: "tokens",
-    component: ComingSoon,
+    component: () => import("@/views/Tokens.vue"),
     meta: { title: "Tokens" },
   },
   {
     path: "/admin/tokens/:token",
     name: "token-detail",
-    component: ComingSoon,
+    component: () => import("@/views/TokenDetail.vue"),
     meta: { title: "Token detail" },
   },
+  // v3 removed: collisions / audit-log / discover. The source-driven pipeline
+  // doesn't have a manual collision registry, governed audit log, or
+  // discovery scan to populate.
   {
-    path: "/admin/collisions",
-    name: "collisions",
-    component: ComingSoon,
-    meta: { title: "Collisions" },
+    path: "/admin/labels",
+    name: "labels",
+    component: () => import("@/views/Labels.vue"),
+    meta: { title: "Labels" },
   },
   {
-    path: "/admin/audit-log",
-    name: "audit-log",
-    component: ComingSoon,
-    meta: { title: "Audit Log" },
-  },
-  {
-    path: "/admin/discover",
-    name: "discover",
-    component: ComingSoon,
-    meta: { title: "Discover" },
+    path: "/admin/centroids",
+    name: "centroids",
+    component: () => import("@/views/Centroids.vue"),
+    meta: { title: "Centroids" },
   },
   // Catch-all → bulk classify so a stale link can't 404 the SPA.
   { path: "/:pathMatch(.*)*", redirect: "/classify" },

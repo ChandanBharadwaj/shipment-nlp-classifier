@@ -1,569 +1,230 @@
-# Setup Guide — Shipment NLP Classifier
+# Setup — Shipment Classifier (v3)
 
-Step-by-step instructions to run the full system locally: PostgreSQL + pgvector database, Python ML service, classification API, and the semantic compliance layer.
+End-to-end local setup: Postgres + pgvector, Python ML service, the data
+pipeline, and the SPA.
 
-Total time on a fresh machine: **~10 minutes** (most of it is the first-time model download and pip install).
-
----
-
-## 0. Prerequisites
-
-Install these once:
-
-| Tool | Version | Notes |
-|---|---|---|
-| **Docker Desktop** | latest | Hosts the PostgreSQL + pgvector container |
-| **Python** | 3.10 or newer | `python --version` to check |
-| **Git** | any | To clone the repo |
-
-> **Windows users:** make sure Docker Desktop is **running** (not just installed) before step 2 — the system tray icon should be green.
+Total time on a fresh machine: **~15 minutes** (most of it is the first-time
+SentenceTransformer model download).
 
 ---
 
-## 1. Clone the repository
+## Prerequisites
+
+- **Python** 3.11+ with `venv`
+- **Node** 20+ with `npm`
+- **Docker Desktop** (for Postgres + pgvector)
+- **Git**
+
+Optional: **`ANTHROPIC_API_KEY`** if you want to regenerate categories /
+CCTR rows from the LLM. Without it, the chat-generated CSVs at
+`data/llm_generated/` substitute for the same output.
+
+---
+
+## 1. Clone + create env
 
 ```bash
-git clone <repo-url> shipment-nlp-classifier
+git clone <repo> shipment-nlp-classifier
 cd shipment-nlp-classifier
-```
 
-All commands from this point are run from the repo root unless noted otherwise.
+# .env at repo root (loaded by init_db.py and the pipeline scripts)
+cat > .env <<EOF
+DATABASE_URL=postgresql://shipment:shipment@localhost:5555/shipment_db
+EOF
+
+# .env at ml-service/.env (loaded by uvicorn at startup)
+cat > ml-service/.env <<EOF
+DATABASE_URL=postgresql://shipment:shipment@localhost:5555/shipment_db
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EOF
+```
 
 ---
 
-## 2. Start the database
+## 2. Database
 
 ```bash
 docker compose up -d
-```
+# Postgres is on port 5555 (mapped from container's 5432). pgvector extension
+# is preloaded by docker/init.sql.
 
-This pulls `pgvector/pgvector:pg16` (~400 MB on first run) and starts PostgreSQL on host port **5555**.
-
-Verify:
-
-```bash
-docker compose ps
-```
-
-You should see:
-```
-NAME                              STATUS         PORTS
-shipment-nlp-classifier-db-1      Up (healthy)   0.0.0.0:5555->5432/tcp
-```
-
-If `STATUS` says `starting`, wait ~10 seconds and re-check.
-
----
-
-## 3. Configure environment variables
-
-```bash
-cd ml-service
-copy .env.example .env          # Windows
-# cp .env.example .env          # macOS / Linux
-```
-
-The default `.env` already points at the Docker DB (`postgresql://shipment:shipment@localhost:5555/shipment_db`). No edits needed for local dev.
-
----
-
-## 4. Create the Python virtual environment
-
-```bash
-# Still inside ml-service/
-python -m venv venv
-
-# Activate it
-venv\Scripts\activate              # Windows (cmd or PowerShell)
-# source venv/bin/activate         # macOS / Linux
-```
-
-Your prompt should now show `(venv)`.
-
----
-
-## 5. Install Python dependencies
-
-```bash
-pip install -r requirements.txt --prefer-binary
-```
-
-Takes ~3-5 minutes on first run. Pulls `sentence-transformers`, `fastapi`, `psycopg2-binary`, `pgvector`, `numpy`, `hdbscan`, etc.
-
-> **Windows note:** `--prefer-binary` is important because `hdbscan` would otherwise need a C compiler. If you still hit a build error, run `pip install hdbscan --prefer-binary` separately first.
-
----
-
-## 6. Initialize the database (schema + seed data)
-
-From the repo root:
-
-```bash
-cd ..                              # back to repo root
+# Wait for healthy (a few seconds), then apply schema + seed shipment labels.
 python init_db.py
 ```
 
-This runs `schema.sql` then all seed files in order. Expected output ends with:
+What this creates:
 
-```
-── Summary ──────────────────────────────────────────────────
-  classification_categories                   20 categories
-  category_keywords                         1936 keywords
-  shipment_labels                          16778 labeled rows
-  category_hs_chapters                        96 HS chapters
-
-Done. Next step: build centroids.
-  cd ml-service && python centroid_builder.py
-```
-
-Idempotent — re-running is safe.
+| Table | Rows after init | Populated by |
+|---|---:|---|
+| `categories` | 0 | step 4 below |
+| `chapter_categories` | 0 | step 4 below |
+| `keywords` | 0 | step 4 below |
+| `category_centroids` | 0 | step 5 below |
+| `public_source_descriptions` | 0 | step 4 below |
+| `shipment_labels` | 15,452 | `init_db.py` (eval data) |
+| `shipment_classifications` | 0 | runtime, when `/classify` is called with `persist=true` |
 
 ---
 
-## 7. Build category centroids
+## 3. ml-service venv + dependencies
 
 ```bash
 cd ml-service
-python centroid_builder.py
+python -m venv venv
+venv/Scripts/pip install -r requirements.txt   # Linux/Mac: source venv/bin/activate; pip install ...
+cd ..
 ```
 
-This embeds the labeled training rows and writes one centroid per (category × HS chapter) pair into `category_centroids`. Expect **~2-4 minutes** on first run (model download `all-MiniLM-L6-v2` ~90 MB + embedding ~12k rows).
+This pulls SentenceTransformer (~80MB model on first use), psycopg2,
+pgvector, FastAPI, etc.
 
-Verify:
+---
 
-```sql
--- via any psql/DBeaver/pgAdmin connection
-SELECT COUNT(*) FROM category_centroids;
--- Should return 116 (one per chapter centroid across the 20 categories)
+## 4. Build the v3 data layer
+
+This is the heart of v3. Each step is idempotent — re-running won't
+duplicate rows.
+
+```bash
+# 4a. Fetch upstream public sources to local cache (USITC + UK Trade Tariff)
+python scripts/fetch_public_data.py
+# → data/hs/usitc_hts_2024.json (35K items)
+# → data/hs/uk_chapters_raw/NN.json (96 files)
+
+# 4b. Load USITC + UK into public_source_descriptions table (~27K rows)
+python scripts/load_public_sources.py
+
+# 4c. Load LLM-generated categories + chapter mapping
+python scripts/load_llm_categories.py
+# → categories table (36 rows)
+# → chapter_categories table (96 rows; every active chapter mapped)
+#
+# Reads data/llm_generated/chapter_categories.csv. To regenerate from
+# the LLM with an API key:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   python scripts/llm_classify_chapters.py    # ~$1, 2 LLM calls
+
+# 4d. Load LLM-generated CCTR rows (anchors / suppressors / modifiers)
+python scripts/load_llm_cctr.py
+# → keywords table, source='chat:claude:YYYY-MM-DD' (~575 rows)
+#
+# Reads data/llm_generated/cctr_rows.csv. To regenerate:
+#   python scripts/llm_generate_cctr.py        # ~$10-20, 192 LLM calls
+
+# 4e. Per-chapter TF-IDF over public_source_descriptions
+python scripts/build_public_keywords.py
+# → keywords table, source='public_tfidf' (~6.6K rows)
+
+# 4f. Cross-validate chat CCTR vs source text + auto-promote unused TF-IDF
+python scripts/validate_chat_cctr.py
+# → keywords table, source='tfidf_promoted:YYYY-MM-DD' (~1.6K rows)
+# → data/llm_generated/anchor_review.csv  (suspicious chat anchors flagged)
 ```
 
 ---
 
-## 8. Fit Platt calibration (recommended)
-
-Calibration converts raw cosine similarity into a true probability per category. Without it, the API still works but `probability` fields are uncalibrated.
+## 5. Build centroids
 
 ```bash
-python fit_calibration.py
+python ml-service/centroid_builder.py
+# → category_centroids table (96 rows; one per (category, chapter) with text)
 ```
 
-Takes ~30 seconds. Writes `platt_a`/`platt_b` per category into `classification_categories`.
+Centroids are L2-normalized embedding averages of the
+`public_source_descriptions` text per `(category_slug, hs_chapter)`. Wipe
+and rebuild — never insert manually.
 
 ---
 
-## 9. Start the API service
+## 6. Start the classifier API
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Startup logs should show:
-
-```
-Risk profile: 12 global blocked, 79 category hard negatives, 359 total vectors embedded
-Loaded 20 category centroids (chapter centroids total: 116), 96 HS chapters, model=sentence-transformers/all-MiniLM-L6-v2
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-Leave this terminal running.
-
----
-
-## 10. Smoke-test the API
-
-Open a **new terminal** (the API one is busy):
-
-### Health check
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected:
-```json
-{
-  "status": "ok",
-  "categories_loaded": 20,
-  "chapter_centroids": 116,
-  "hs_chapters": 96,
-  "model_version": "sentence-transformers/all-MiniLM-L6-v2",
-  "calibrated": true,
-  "risk_vectors": 359
-}
-```
-
-### Classify + compliance — clean shipment (should ALLOW)
-
-```bash
-curl -X POST http://localhost:8000/classify ^
-  -H "Content-Type: application/json" ^
-  -d "{\"shipment_id\": \"s1\", \"cargo_description\": \"LEGO building blocks educational toy\", \"commodity_description\": \"plastic toys 500 pieces\"}"
-```
-
-Look for `"is_risky": false` in the response.
-
-### Classify + compliance — risky shipment (should be flagged)
-
-```bash
-curl -X POST http://localhost:8000/classify ^
-  -H "Content-Type: application/json" ^
-  -d "{\"shipment_id\": \"s2\", \"cargo_description\": \"depleted uranium fuel rods\", \"commodity_description\": \"nuclear material reactor grade\"}"
-```
-
-Look for `"is_risky": true` and a `decision_reasons` entry citing the IAEA-controlled phrase match.
-
-> **Windows curl note:** the `^` is line continuation in `cmd`. In PowerShell use a backtick `` ` ``. In bash use `\`.
-
-### Long-input safety — buried tail risk (chunking proof)
-
-A 2,000-token manifest with the risk phrase in the **last sentence** would be silently truncated by single-shot embedding. The chunking layer catches it. Save this body to `tail_risk.json` (PowerShell handles big payloads better than `cmd`):
-
-```powershell
-$body = @{
-  shipment_id = "s3"
-  cargo_description = ("Industrial machinery components: hydraulic pumps, steel valves, ball bearings, conveyor belts, electric motors, pneumatic actuators. " * 60) + " Yellowcake uranium concentrate drums sealed for international transport. Plutonium fissile material in shielded containers. Depleted uranium nuclear material counterweights."
-  commodity_description = "minerals shipment manifest"
-} | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:8000/classify -ContentType "application/json" -Body $body
-```
-
-Look for:
-- `meta.chunks_processed > 1` (input was actually chunked)
-- `compliance.is_risky: true`
-- `compliance.hard_negative_hits[].chunk_idx > 0` (the hit came from a tail chunk, not chunk 0)
-
----
-
-## 10b. Try the bulk-upload UI
-
-Open <http://localhost:8000/ui> in a browser. Drag
-`ml-service/static/sample.csv` onto the dropzone (or click to pick it).
-
-Expected:
-
-- 7 rows render in the results table within ~2-4 seconds.
-- **demo-001 / demo-002 / demo-003 / demo-004** classify cleanly into
-  `toys`, `machinery`, `perishables`, `textiles` respectively — one chip
-  per row, each in its own distinct colour, each with its risk-tier text
-  tag (`HIGH RISK` / `MED RISK` / `LOW RISK`). Compliance shows a green
-  `clean` badge.
-- **demo-005 (depleted uranium)** comes back as `unclassified` (none of
-  the 20 trade categories own "nuclear material") but compliance still
-  flags it RISKY via the global blocked-phrase semantic match. The row
-  gets a red **RISKY** badge plus a 4 px red left border, and the reason
-  cell quotes the IAEA control match.
-- **demo-006 (MANPADS)** also comes back `unclassified` (top-1 didn't
-  fire) but compliance flags it RISKY via the category-scoped MANPADS
-  semantic match (ITAR Category IV). Same red badge + border treatment.
-- **demo-007 (gibberish)** is `unclassified` *and* RISKY — the cascade
-  conservatively routes any unclassified input for human review. The
-  chip cell shows a grey `unclassified` chip plus up to three small grey
-  `considered: X (0.31)` runner-up chips so you see what the model
-  weighed and rejected.
-- Reload the browser tab → the table and file input both clear. No state
-  survives. DevTools → Application → Storage shows nothing set by `/ui`.
-
-The UI calls `/classify/batch` exactly once with `persist: false` on every
-row, so nothing is written to the DB. Verify with:
-
-```sql
-SELECT count(*) FROM shipment_classifications WHERE shipment_id LIKE 'demo-%';
--- 0
-```
-
----
-
-## 11. Run the test suites
-
-```bash
-# Inside ml-service/ with venv active
-python test_compliance.py
-python test_chunking.py
-python -m pytest tests/ -v
-```
-
-Expected:
-- `test_compliance.py` → **`24 passed, 0 failed out of 24`** — every cascade path (global block, category block/review, semantic paraphrases, high-risk routing, low-confidence routing, allow path, multi-label edges).
-- `test_chunking.py` → **`26 passed, 0 failed out of 26`** — `chunk_text` unit behavior (fast path, sentence pack, word pack, hard cut, DoS cap), aggregation, the silent-truncation **baseline** (test 9 documents the bug), and the buried-tail-risk **catch** via per-chunk compliance (test 10 proves the fix).
-- `pytest tests/` → **`36 passed`** — pollution-defense unit suite: top-margin rule branches + metrics counters (`tests/test_margin_rule.py`), sigmoid-wrapped CE reranker short-circuit & drop behavior (`tests/test_reranker.py`), prune helpers (`tests/test_prune.py`), metrics snapshot semantics (`tests/test_metrics.py`).
-
-All three load the embedding model but need no DB.
-
----
-
-## 12. Clean start + exercise the three-phase defense
-
-Use this when you want a **reproducible from-zero run** that actually proves each new layer does something. Every step is copy-paste; the whole walk takes ~8 minutes after the initial install.
-
-### 12.0. Wipe and re-init (optional, only if you want a truly clean slate)
-
-> **Destructive** — drops all data in the container, including any classifications you've written. Skip if you want to keep what's there.
-
-```bash
-# From repo root
-docker compose down -v                 # wipes DB volume
-docker compose up -d                   # fresh container
-# wait ~10 seconds for pgvector to be ready
-python init_db.py                      # schema + seed data
 cd ml-service
-python centroid_builder.py             # ~2-4 min
-python fit_calibration.py              # ~30 sec
+venv/Scripts/uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-### 12.1. Start the service (Phase 1 active, Phase 3 off — the default)
+The first startup loads SentenceTransformer (~5-10s) plus the in-memory
+state (centroids, keywords, chapter map). Watch for:
+
+```
+Loaded 36 category centroids (chapter centroids total: 96), 96 HS chapters,
+model=sentence-transformers/all-MiniLM-L6-v2
+INFO: Application startup complete.
+```
+
+Sanity:
 
 ```bash
-# Inside ml-service/ with venv active
-uvicorn main:app --port 8000 --reload
+curl http://127.0.0.1:8000/health
+# {"status":"ok","categories_loaded":36,"chapter_centroids":96, ...}
+
+curl -X POST http://127.0.0.1:8000/classify -H 'content-type: application/json' \
+  -d '{"shipment_id":"t1","cargo_description":"M16 rifle 5.56mm","commodity_description":"military arms"}'
+# Expect: arms_ammunition, ch93
 ```
-
-Confirm Phase 1 is wired in and Phase 3 is off:
-
-```bash
-curl http://localhost:8000/health
-# expect ...  "reranker_enabled": false  ...
-```
-
-### 12.2. Smoke-test Phase 1 (top-margin rule)
-
-The margin rule suppresses weak tail labels. To see it work, classify a row that previously over-labeled. Pick one that should clearly be `automotive` alone:
-
-```bash
-curl -X POST http://localhost:8000/classify ^
-  -H "Content-Type: application/json" ^
-  -d "{\"shipment_id\":\"m1\",\"cargo_description\":\"Tesla Model 3 electric vehicle spare parts motor battery cells\",\"commodity_description\":\"automotive components\"}"
-```
-
-Expected in the response: `result.categories` is a **single** entry (`automotive`). Before the margin rule this row typically fired 4–5 labels because `motor`, `cell`, `battery`, `electronics`-adjacent tokens all leaked above threshold.
-
-Now check the counter:
-
-```bash
-curl http://localhost:8000/metrics
-# expect margin_suppressions_total > 0 (labels the rule dropped across every /classify call since startup)
-```
-
-`margin_suppressions_total / predictions_total` is the rough rate at which the rule fires in practice.
-
-### 12.3. Grid-sweep `threshold × margin_delta` on labeled data
-
-```bash
-python calibrate.py
-```
-
-Expected output: F1 heatmap across 42 cells (7 thresholds × 6 deltas), plus a top-5 table like:
-
-```
-Top 5 cells by F1:
-  #  threshold   delta   precision    recall        f1     tp     fp     fn
-  1      0.450   0.060      0.8914    0.9183    0.9047    ...
-  ...
-Recommended: CLASSIFY_THRESHOLD=0.45  MARGIN_DELTA=0.06
-```
-
-If the recommendation differs from the defaults in [config.py](ml-service/config.py), set the env vars and restart:
-
-```bash
-# PowerShell
-$env:CLASSIFY_THRESHOLD="0.45"; $env:MARGIN_DELTA="0.06"; uvicorn main:app --port 8000
-# Bash
-CLASSIFY_THRESHOLD=0.45 MARGIN_DELTA=0.06 uvicorn main:app --port 8000
-```
-
-Confirm on the test split (no more tuning allowed after this point):
-
-```bash
-python evaluate_threshold.py --split test --threshold 0.45 --margin-delta 0.06
-```
-
-### 12.4. Preview & apply Phase 2 (keyword prune)
-
-Dry-run first — nothing changes until you pass `--apply`:
-
-```bash
-python -m diagnostics.prune_keywords
-```
-
-Expected: a per-category table, e.g. `toys  183 keywords  pruned 41  (22.4%)` with sample `removed:` / `kept:` lists and a total reduction in the 10–25% range. Eyeball for anything obviously wrong (e.g. if a famously category-defining keyword is in the removed list, raise `--min-cosine`).
-
-Targeted preview for one category:
-
-```bash
-python -m diagnostics.prune_keywords --category toys
-```
-
-When happy, commit. A CSV snapshot is written automatically for rollback.
-
-```bash
-python -m diagnostics.prune_keywords --apply
-curl -X POST http://localhost:8000/reload     # pick up the smaller keyword table
-```
-
-Snapshot path appears in the script output — keep it until you're sure the prune is good.
-
-### 12.5. Re-run the Tesla smoke test after prune
-
-```bash
-curl -X POST http://localhost:8000/classify ^
-  -H "Content-Type: application/json" ^
-  -d "{\"shipment_id\":\"m2\",\"cargo_description\":\"Tesla Model 3 electric vehicle spare parts motor battery cells\",\"commodity_description\":\"automotive components\"}"
-```
-
-Expected: still single-label `automotive`, but with fewer runner-up categories showing up in `result.scores`. Keyword pollution is gone at the source, not just suppressed at decision time.
-
-### 12.6. Turn on Phase 3 (cross-encoder reranker)
-
-**Stop the running uvicorn first** (Ctrl+C). Then relaunch with the env var:
-
-```bash
-# PowerShell
-$env:RERANKER_ENABLED="true"; uvicorn main:app --port 8000
-# Bash
-RERANKER_ENABLED=true uvicorn main:app --port 8000
-```
-
-Startup logs gain one line:
-
-```
-Cross-encoder reranker enabled: cross-encoder/ms-marco-MiniLM-L-6-v2
-```
-
-First startup downloads the CE model (~90 MB, one-time). `/health` now reports `"reranker_enabled": true`.
-
-Pick a row that genuinely has 2+ candidates after the margin rule (a product at the boundary of two categories):
-
-```bash
-curl -X POST http://localhost:8000/classify ^
-  -H "Content-Type: application/json" ^
-  -d "{\"shipment_id\":\"r1\",\"cargo_description\":\"cotton t-shirts printed with floral pattern\",\"commodity_description\":\"apparel textiles garment\"}"
-```
-
-Expected in the response: `meta.reranked: true` on rows where Phase 3 actually ran. Each scored category now carries `cross_encoder_score` (raw logit) and `cross_encoder_prob` (sigmoid) fields so you can see what the CE thought.
-
-Counter check:
-
-```bash
-curl http://localhost:8000/metrics
-# rerank_fires_total > 0 means Phase 3 ran on at least one row
-# rerank_drops_total > 0 means Phase 3 shortened someone's label list
-```
-
-### 12.7. Roll back one phase at a time (if needed)
-
-| To disable | How |
-|---|---|
-| Phase 3 (reranker) | Stop uvicorn, unset `RERANKER_ENABLED`, restart |
-| Phase 2 (prune) | Replay the CSV snapshot: `psql … -c "\copy category_keywords(category_id, keyword, weight) FROM 'diagnostics/prune_backup_YYYYMMDD_HHMMSS.csv' CSV HEADER"` then `POST /reload` |
-| Phase 1 (margin rule) | Set `MARGIN_DELTA=1.0` (effectively disables the cutoff) and restart |
-
-### 12.8. Quick end-to-end smoke script
-
-If you want one command to verify the full stack is alive:
-
-```bash
-# PowerShell
-$tests = @(
-  '{"shipment_id":"e1","cargo_description":"LEGO building blocks educational toy","commodity_description":"plastic toys"}',
-  '{"shipment_id":"e2","cargo_description":"Tesla Model 3 EV spare parts","commodity_description":"automotive"}',
-  '{"shipment_id":"e3","cargo_description":"depleted uranium fuel rods","commodity_description":"nuclear material"}'
-)
-foreach ($t in $tests) {
-  Invoke-RestMethod -Method Post -Uri http://localhost:8000/classify -ContentType "application/json" -Body $t |
-    Select-Object -ExpandProperty result | Select-Object categories, confidence_state
-}
-Invoke-RestMethod http://localhost:8000/metrics
-```
-
-You should see:
-- `e1` → `toys`, `classified`
-- `e2` → `automotive`, `classified`
-- `e3` → `[]`, `unclassified` (but the full response will have `compliance.is_risky: true`)
-- `/metrics` with non-zero `predictions_total` and some `margin_suppressions_total`.
 
 ---
 
-## You're done
+## 7. Build the SPA
 
-- API: <http://localhost:8000>
-- Auto-generated docs: <http://localhost:8000/docs>
-- DB: `postgresql://shipment:shipment@localhost:5555/shipment_db`
-
----
-
-## Common follow-up commands
-
-| What you want | Command |
-|---|---|
-| Reload risk profile after editing `risk_profile.json` | `curl -X POST http://localhost:8000/reload` |
-| Reload centroids after re-running `centroid_builder.py` | `curl -X POST http://localhost:8000/reload` |
-| Check runtime counters (margin suppressions, reranker fires) | `curl http://localhost:8000/metrics` |
-| Grid-sweep `threshold × margin_delta` for F1 | `python calibrate.py` |
-| Preview single-token keyword prune (dry run) | `python -m diagnostics.prune_keywords` |
-| Commit prune + auto-reload the service | `python -m diagnostics.prune_keywords --apply && curl -X POST http://localhost:8000/reload` |
-| Stop the database (keep data) | `docker compose down` |
-| **Wipe the database** (delete all data) | `docker compose down -v` |
-| Tail API logs | The terminal running `uvicorn` |
-| Tail DB logs | `docker compose logs -f db` |
-
----
-
-## Tunable knobs (env vars, optional)
-
-All tunables live in [`ml-service/config.py`](ml-service/config.py) with env-var overrides — set them in `.env` or the shell before starting `uvicorn`. Restart the service to pick up changes.
-
-| Env var | Default | What it controls |
-|---|---|---|
-| `CLASSIFY_THRESHOLD` | `0.45` | Score at or above → `classified` band |
-| `UNCLASSIFIED_THRESHOLD` | `0.35` | Floor below which → `unclassified` |
-| `MARGIN_DELTA` | `0.06` | Secondary labels must be within δ of the top score (Phase 1) |
-| `KEYWORD_SATURATION_ALPHA` | `0.5` | Curve steepness for `1 − exp(−α · Σweights)` keyword score |
-| `MIN_KEYWORD_COSINE` | `0.30` | Prune cutoff for single-token keywords (Phase 2, offline) |
-| `RERANKER_ENABLED` | `false` | Turn the cross-encoder reranker on (Phase 3) |
-| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Override the CE model |
-| `CROSS_ENCODER_MARGIN` | `0.15` | CE margin in sigmoid-squashed (0, 1) space |
-
-To enable the reranker end-to-end:
 ```bash
-# Windows PowerShell
-$env:RERANKER_ENABLED="true"; uvicorn main:app --port 8000
-# Bash
-RERANKER_ENABLED=true uvicorn main:app --port 8000
+cd web
+npm install
+npm run build
+# → ml-service/static/dist/  (FastAPI serves at /ui/)
 ```
-Startup logs print `Cross-encoder reranker enabled: …`. `GET /health` shows `reranker_enabled: true`.
+
+For HMR-enabled dev:
+
+```bash
+cd web && npm run dev
+# Vite on :5173, proxies API calls to :8000
+```
+
+Open [http://localhost:8000/ui/](http://localhost:8000/ui/).
+
+---
+
+## Refreshing data later
+
+The pipeline is incremental — re-run any subset:
+
+```bash
+# Refresh from upstream APIs
+python scripts/fetch_public_data.py --force
+python scripts/load_public_sources.py
+
+# Re-derive everything keyword/centroid-related
+python scripts/build_public_keywords.py
+python scripts/validate_chat_cctr.py
+python ml-service/centroid_builder.py
+
+# Tell the running classifier to pick up the new state without restart
+curl -X POST http://localhost:8000/reload
+```
 
 ---
 
 ## Troubleshooting
 
-### "Connection refused" on port 5555
-Docker Desktop isn't running. Start it from the Start menu, wait for the whale icon to stop animating, then re-run `docker compose up -d`.
-
-### `ModuleNotFoundError: No module named 'sentence_transformers'`
-Your venv isn't activated. Look for `(venv)` in your prompt. If missing, run `venv\Scripts\activate` from inside `ml-service/`.
-
-### `psycopg2.OperationalError: FATAL: database "shipment_db" does not exist`
-The container started but `docker/init.sql` didn't run (rare race condition). Wipe and restart:
-```bash
-docker compose down -v
-docker compose up -d
-# wait 15 seconds
-python init_db.py
-```
-
-### Slow first request to `/classify`
-The `sentence-transformers` model lazy-loads on first use. First request takes 5-10 seconds; subsequent requests are <100 ms.
-
-### `is_risky` is missing from the response
-Check the startup logs — if you don't see the `Risk profile: 12 global blocked, 79 category hard negatives, 359 total vectors embedded` line, the JSON file is malformed. The validator will print the offending entry. Fix `risk_profile.json` and call `POST /reload`.
-
-### Port 8000 already in use
-Either stop the existing process, or start uvicorn on a different port: `uvicorn main:app --port 8001`.
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `psycopg2.OperationalError: connection refused` | Postgres container not running / not healthy | `docker compose up -d`; `docker compose ps` to check health |
+| `"chapter_categories empty"` from build_public_keywords.py | Step 4c skipped | `python scripts/load_llm_categories.py` |
+| `/classify` returns `unclassified` for everything | Centroids not built | `python ml-service/centroid_builder.py` then `curl -X POST .../reload` |
+| `ANTHROPIC_API_KEY not set` | Trying to use `llm_*` scripts without a key | Use the `load_llm_*` scripts instead — they read from chat-substitute CSVs |
+| SPA shows grey chips with snake_case names | Catalog not loaded; dev server stale bundle | Hard-refresh (Ctrl+Shift+R) |
 
 ---
 
-## What's next
+## What this setup does NOT do
 
-- Read the [README.md](README.md) for the problem statement and architecture.
-- Read `risk_profile.json` to understand the compliance rule format.
-- Read `ml-service/compliance.py` to see the semantic decision cascade.
-- Run `python evaluate_threshold.py --split validation` to tune the classifier threshold for your dataset.
+- **Calibration.** v3 returns raw probabilities. There's no Platt scaling
+  step. Downstream consumers interpret the score directly.
+- **Manual CCTR mutation API.** v3 doesn't expose write endpoints — keywords
+  are regenerated via the pipeline scripts, not edited in-flight.
+- **Audit log.** Same reason: no in-flight edits, so no audit trail.
+- **Collision registry.** Replaced by the source-driven CCTR pipeline (chat
+  + TF-IDF promotion).
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the rationale.

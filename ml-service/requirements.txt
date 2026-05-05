@@ -8,5 +8,10 @@ pgvector>=0.2,<1.0
 # Windows: install with --prefer-binary to avoid C compiler requirement
 # conda users: conda install -c conda-forge hdbscan
 hdbscan>=0.8,<1.0
+# Optional: enables UMAP for the /admin/api/centroids projection. Falls
+# back to sklearn's PCA if missing, so service still boots without it.
+umap-learn>=0.5,<1.0
 python-dotenv>=1.0,<2.0
 pytest>=7.0,<9.0
+# httpx backs starlette.testclient.TestClient used by tests/test_admin_routes.py
+httpx>=0.27,<1.0

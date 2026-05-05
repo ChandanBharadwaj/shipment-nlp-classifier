@@ -48,6 +48,7 @@ from classifier import (
     load_chapter_to_category,
     load_cross_encoder,
     load_keywords,
+    load_keywords_typed,
     predict,
     predict_batch,
 )
@@ -68,6 +69,7 @@ from admin_routes import router as admin_router
 # In-memory state refreshed on /reload
 centroids:             dict = {}
 keywords:              dict = {}
+keywords_typed:        dict = {}
 category_config:       dict = {}
 chapter_titles:        dict = {}
 chapter_to_category:   dict = {}
@@ -111,11 +113,13 @@ def _load_risk() -> dict:
 async def lifespan(app: FastAPI):
     """FastAPI lifespan: load DB-backed state + risk vectors on startup,
     close the connection pool on shutdown."""
-    global centroids, keywords, category_config, chapter_titles, chapter_to_category
+    global centroids, keywords, keywords_typed, category_config
+    global chapter_titles, chapter_to_category
     global category_descriptions, risk_vectors
     with pooled_connection() as conn:
         centroids           = load_centroids(conn)
         keywords            = load_keywords(conn)
+        keywords_typed      = load_keywords_typed(conn)
         category_config     = load_category_config(conn)
         chapter_titles      = load_chapter_titles(conn)
         chapter_to_category = load_chapter_to_category(conn)
@@ -394,6 +398,7 @@ def classify(req: ClassifyRequest) -> dict:
         chapter_titles=chapter_titles,
         chapter_to_category=chapter_to_category,
         category_descriptions=category_descriptions if RERANKER_ENABLED else None,
+        keywords_typed=keywords_typed,
     )
 
     # Semantic compliance decision (uses the shipment embedding)
@@ -436,6 +441,7 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
         chapter_titles=chapter_titles,
         chapter_to_category=chapter_to_category,
         category_descriptions=category_descriptions if RERANKER_ENABLED else None,
+        keywords_typed=keywords_typed,
     )
 
     # Semantic compliance decisions (reuses each shipment's embedding)
@@ -470,11 +476,13 @@ def classify_batch(req: ClassifyBatchRequest) -> list[dict]:
 @app.post("/reload")
 def reload() -> dict:
     """Reload centroids, keywords, chapter titles, HS→category map, per-category config, and risk vectors."""
-    global centroids, keywords, category_config, chapter_titles, chapter_to_category
+    global centroids, keywords, keywords_typed, category_config
+    global chapter_titles, chapter_to_category
     global category_descriptions, risk_vectors
     with pooled_connection() as conn:
         centroids           = load_centroids(conn)
         keywords            = load_keywords(conn)
+        keywords_typed      = load_keywords_typed(conn)
         category_config     = load_category_config(conn)
         chapter_titles      = load_chapter_titles(conn)
         chapter_to_category = load_chapter_to_category(conn)

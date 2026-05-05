@@ -61,11 +61,10 @@ onMounted(() => {
         <RouterLink to="/admin/overview">Overview</RouterLink>
         <RouterLink to="/admin/browse">Browse</RouterLink>
         <RouterLink to="/admin/tokens">Tokens</RouterLink>
-        <RouterLink to="/admin/collisions">Collisions</RouterLink>
+        <RouterLink to="/admin/labels">Labels</RouterLink>
 
-        <div class="group">Governance</div>
-        <RouterLink to="/admin/audit-log">Audit Log</RouterLink>
-        <RouterLink to="/admin/discover">Discover</RouterLink>
+        <div class="group">Insights</div>
+        <RouterLink to="/admin/centroids">Centroids</RouterLink>
       </nav>
     </aside>
 

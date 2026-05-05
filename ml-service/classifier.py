@@ -2,18 +2,18 @@
 Core classification logic.
 
 No FastAPI imports here — this module is used by main.py, centroid_builder.py,
-evaluate_threshold.py, fit_calibration.py, and discover_unknowns.py alike.
+and evaluate_threshold.py alike.
 
 Scoring formula (per category):
-    semantic_score = max_k cosine_similarity(query_embedding, sub_centroid_k)
-                   = max_k dot(query_emb, sub_centroid_k)   [L2-normalized]
+    semantic_score = max_k cosine_similarity(query_embedding, centroid_k)
+                   = max_k dot(query_emb, centroid_k)   [L2-normalized]
     keyword_score  = 1 - exp(-alpha * sum_of_weights_of_matched_keywords)
                      (word-boundary matching, naive plural stripping)
-    final_score    = semantic_weight[cat] * semantic_score
-                   + keyword_weight[cat]  * keyword_score
-                     (defaults: 0.8 / 0.2; per-category override in DB)
-    probability    = sigmoid(platt_a[cat] * final_score + platt_b[cat])
-                     (NULL calibration → probability = final_score passthrough)
+    final_score    = semantic_weight * semantic_score
+                   + keyword_weight  * keyword_score
+                     (v3 defaults: 0.8 / 0.2 for every category — no
+                     per-category overrides; calibration dropped)
+    probability    = final_score passthrough (uncalibrated in v3)
 
 Confidence bands (evaluated on `final_score`, not probability):
     final_score (max across categories) < unclassified_threshold → unclassified
@@ -181,14 +181,12 @@ def load_centroids(conn) -> dict[str, list[tuple[str, np.ndarray]]]:
     result: dict[str, list[tuple[str, np.ndarray]]] = defaultdict(list)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT cc.name, COALESCE(cen.hs_chapter, ''), cen.centroid
-            FROM   category_centroids cen
-            JOIN   classification_categories cc ON cc.id = cen.category_id
-            WHERE  cc.is_active = true
-            ORDER  BY cc.name, cen.hs_chapter
+            SELECT category_slug, COALESCE(hs_chapter, ''), centroid
+            FROM   category_centroids
+            ORDER  BY category_slug, hs_chapter
         """)
-        for name, hs_chapter, centroid in cur.fetchall():
-            result[name].append((hs_chapter, np.array(centroid)))
+        for slug, hs_chapter, centroid in cur.fetchall():
+            result[slug].append((hs_chapter, np.array(centroid)))
     return dict(result)
 
 
@@ -196,7 +194,8 @@ def load_chapter_titles(conn) -> dict[str, str]:
     """Return {hs_chapter: chapter_title} for all 96 active HS chapters."""
     titles: dict[str, str] = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT hs_chapter, chapter_title FROM category_hs_chapters")
+        # v3: titles live on chapter_categories (LLM-derived map)
+        cur.execute("SELECT hs_chapter, chapter_title FROM chapter_categories")
         for hs_chapter, title in cur.fetchall():
             titles[hs_chapter] = title
     return titles
@@ -205,19 +204,14 @@ def load_chapter_titles(conn) -> dict[str, str]:
 def load_chapter_to_category(conn) -> dict[str, str]:
     """Return {hs_chapter: category_name} for the HS-code tiebreaker.
 
-    Schema guarantees ``UNIQUE(hs_chapter)`` — each chapter maps to exactly one
-    active category — so no ambiguity here.
+    v3 schema: chapter_categories.category_slug holds the v3 category slug.
+    Each chapter maps to exactly one category (PK constraint).
     """
     mapping: dict[str, str] = {}
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT chc.hs_chapter, cc.name
-            FROM   category_hs_chapters chc
-            JOIN   classification_categories cc ON cc.id = chc.category_id
-            WHERE  cc.is_active = true
-        """)
-        for hs_chapter, name in cur.fetchall():
-            mapping[hs_chapter] = name
+        cur.execute("SELECT hs_chapter, category_slug FROM chapter_categories")
+        for hs_chapter, slug in cur.fetchall():
+            mapping[hs_chapter] = slug
     return mapping
 
 
@@ -258,45 +252,29 @@ def _hs_text_mismatch(hs_implied: list[str], matched_categories: list[str]) -> b
 
 def load_keywords(conn) -> dict[str, list[tuple[str, float]]]:
     """
-    Load keywords (lowercased) and their weights for all active categories.
+    Load signal-class keywords (lowercased) and their weights, keyed by
+    category slug.
+
+    v3 schema: keywords.hs_chapter is the source-of-truth pin; the category
+    is derived via JOIN to chapter_categories. Both 'public_tfidf' and
+    'tfidf_promoted:*' (sources from build_public_keywords.py +
+    validate_chat_cctr.py promotion) contribute. Anchors, suppressors,
+    and modifiers are excluded — those go through load_keywords_typed.
 
     Returns:
-        {category_name: [(keyword_lowercase, weight), ...]}
-
-    Backwards-compatible legacy view. Includes only ``signal_class='signal'``
-    rows once CCTR has been applied (anchors, modifiers and suppressors don't
-    enter the legacy keyword score). Pre-CCTR rows have ``signal_class`` as
-    the column default ``'signal'`` so they pass through.
+        {category_slug: [(keyword_lowercase, weight), ...]}
     """
     keywords: dict[str, list] = defaultdict(list)
     with conn.cursor() as cur:
-        # Defensively detect signal_class column to keep working against
-        # un-migrated installs.
         cur.execute("""
-            SELECT 1 FROM information_schema.columns
-            WHERE  table_name='category_keywords' AND column_name='signal_class'
+            SELECT cm.category_slug, k.keyword, k.weight
+            FROM   keywords k
+            JOIN   chapter_categories cm USING (hs_chapter)
+            WHERE  k.signal_class = 'signal'
+            ORDER  BY cm.category_slug, k.keyword
         """)
-        has_class = cur.fetchone() is not None
-
-        if has_class:
-            cur.execute("""
-                SELECT cc.name, ck.keyword, ck.weight
-                FROM   category_keywords ck
-                JOIN   classification_categories cc ON cc.id = ck.category_id
-                WHERE  cc.is_active = true
-                  AND  ck.signal_class = 'signal'
-                ORDER  BY cc.name, ck.keyword
-            """)
-        else:
-            cur.execute("""
-                SELECT cc.name, ck.keyword, ck.weight
-                FROM   category_keywords ck
-                JOIN   classification_categories cc ON cc.id = ck.category_id
-                WHERE  cc.is_active = true
-                ORDER  BY cc.name, ck.keyword
-            """)
-        for name, keyword, weight in cur.fetchall():
-            keywords[name].append((keyword.lower(), float(weight)))
+        for slug, keyword, weight in cur.fetchall():
+            keywords[slug].append((keyword.lower(), float(weight)))
     return dict(keywords)
 
 
@@ -318,63 +296,31 @@ KeywordRow = tuple[str, float, str, str, list[str]]
 
 def load_keywords_typed(conn) -> dict[str, list[KeywordRow]]:
     """
-    Load every category_keywords row with its (hs_chapter, signal_class)
-    typing intact. Used by the CCTR scoring path and by collision-aware
-    diagnostics — never by the legacy keyword_score function.
+    Load every keywords row with its (hs_chapter, signal_class) typing
+    intact, keyed by category slug. Used by the CCTR scoring path and
+    collision-aware diagnostics.
+
+    v3 schema: modifiers carry their target_chapter as a structured column
+    instead of a free-text notes parse. We project it into the legacy
+    `targets: list[str]` shape so downstream scoring code is unchanged.
 
     Returns:
-        {category_name: [(keyword, weight, hs_chapter, signal_class, targets), ...]}
-
-    For modifier rows the ``notes`` column is parsed for a ``targets:ch85,ch87``
-    directive — modifiers without a target list don't retype anything and
-    behave like a no-op. Plain English notes (no ``targets:`` token) are
-    ignored. This keeps the seed/SQL contract unchanged: the targets list
-    rides on the existing ``notes`` column, no schema bump.
+        {category_slug: [(keyword, weight, hs_chapter, signal_class, targets), ...]}
     """
     typed: dict[str, list[KeywordRow]] = defaultdict(list)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT 1 FROM information_schema.columns
-            WHERE  table_name='category_keywords' AND column_name='signal_class'
+            SELECT cm.category_slug, k.keyword, k.weight,
+                   k.hs_chapter, k.signal_class, k.target_chapter
+            FROM   keywords k
+            JOIN   chapter_categories cm USING (hs_chapter)
+            ORDER  BY cm.category_slug, k.signal_class, k.hs_chapter, k.keyword
         """)
-        if cur.fetchone() is None:
-            # Pre-migration install: every row defaults to signal_class='signal'
-            # with no chapter. The CCTR path is a no-op in that case (all rows
-            # are plain signals with chapter==''), so it falls back to the
-            # legacy behaviour.
-            cur.execute("""
-                SELECT cc.name, ck.keyword, ck.weight
-                FROM   category_keywords ck
-                JOIN   classification_categories cc ON cc.id = ck.category_id
-                WHERE  cc.is_active = true
-                ORDER  BY cc.name, ck.keyword
-            """)
-            for name, keyword, weight in cur.fetchall():
-                typed[name].append((keyword.lower(), float(weight), "", "signal", []))
-            return dict(typed)
-
-        cur.execute("""
-            SELECT cc.name, ck.keyword, ck.weight,
-                   COALESCE(ck.hs_chapter, ''), ck.signal_class, ck.notes
-            FROM   category_keywords ck
-            JOIN   classification_categories cc ON cc.id = ck.category_id
-            WHERE  cc.is_active = true
-            ORDER  BY cc.name, ck.signal_class, ck.hs_chapter, ck.keyword
-        """)
-        for name, keyword, weight, hs, sclass, notes in cur.fetchall():
+        for slug, keyword, weight, hs, sclass, target_chap in cur.fetchall():
             targets: list[str] = []
-            if sclass == "modifier" and notes:
-                # Format: any substring "targets:ch85,ch87,ch95" (chapters
-                # may be 2-digit with or without 'ch' prefix). Anything else
-                # in `notes` is free-text justification — ignored here.
-                m = re.search(r"targets:([\w,\s]+)", notes, flags=re.IGNORECASE)
-                if m:
-                    raw = m.group(1)
-                    for tok in re.split(r"[,\s]+", raw):
-                        tok = tok.strip().lower().lstrip("ch").zfill(2)
-                        if tok and tok.isdigit() and len(tok) == 2:
-                            targets.append(tok)
-            typed[name].append(
+            if sclass == "modifier" and target_chap:
+                targets.append(str(target_chap).zfill(2))
+            typed[slug].append(
                 (keyword.lower(), float(weight), hs or "", sclass, targets)
             )
     return dict(typed)
@@ -382,30 +328,24 @@ def load_keywords_typed(conn) -> dict[str, list[KeywordRow]]:
 
 def load_category_config(conn) -> dict[str, dict]:
     """
-    Load per-category tuning parameters:
-        semantic_weight, keyword_weight, platt_a, platt_b, threshold.
+    Per-category tuning parameters. v3 doesn't store per-category overrides
+    or Platt scaling — every category gets the same defaults. This function
+    exists so predict()/predict_batch() keep their interface unchanged.
 
     Returns:
-        {category_name: {"semantic_weight": float, "keyword_weight": float,
-                         "platt_a": float|None, "platt_b": float|None,
-                         "threshold": float|None}}
+        {category_slug: {"semantic_weight": 0.8, "keyword_weight": 0.2,
+                         "platt_a": None, "platt_b": None, "threshold": None}}
     """
     config: dict[str, dict] = {}
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT name, semantic_weight, keyword_weight,
-                   platt_a, platt_b, threshold
-            FROM   classification_categories
-            WHERE  is_active = true
-        """)
-        for row in cur.fetchall():
-            name, sw, kw, pa, pb, thr = row
-            config[name] = {
-                "semantic_weight": float(sw) if sw is not None else 0.8,
-                "keyword_weight":  float(kw) if kw is not None else 0.2,
-                "platt_a":         float(pa) if pa is not None else None,
-                "platt_b":         float(pb) if pb is not None else None,
-                "threshold":       float(thr) if thr is not None else None,
+        cur.execute("SELECT slug FROM categories")
+        for (slug,) in cur.fetchall():
+            config[slug] = {
+                "semantic_weight": 0.8,
+                "keyword_weight":  0.2,
+                "platt_a":         None,
+                "platt_b":         None,
+                "threshold":       None,
             }
     return config
 

@@ -1,0 +1,97 @@
+hs_chapter,category_slug,category_display_name,chapter_title
+01,live_animals_animal_products,Live Animals & Animal Products,LIVE ANIMALS
+02,live_animals_animal_products,Live Animals & Animal Products,MEAT AND EDIBLE MEAT OFFAL
+03,live_animals_animal_products,Live Animals & Animal Products,FISH AND CRUSTACEANS, MOLLUSCS AND OTHER AQUATIC INVERTEBRATES
+04,live_animals_animal_products,Live Animals & Animal Products,DAIRY PRODUCE; BIRDS' EGGS; NATURAL HONEY; EDIBLE PRODUCTS OF ANIMAL ORIGIN
+05,live_animals_animal_products,Live Animals & Animal Products,PRODUCTS OF ANIMAL ORIGIN, NOT ELSEWHERE SPECIFIED OR INCLUDED
+06,fresh_produce_vegetables,Fresh Produce & Vegetables,LIVE TREES AND OTHER PLANTS; BULBS, ROOTS AND THE LIKE; CUT FLOWERS AND ORNAMENTAL FOLIAGE
+07,fresh_produce_vegetables,Fresh Produce & Vegetables,EDIBLE VEGETABLES AND CERTAIN ROOTS AND TUBERS
+08,fresh_produce_vegetables,Fresh Produce & Vegetables,EDIBLE FRUIT AND NUTS; PEEL OF CITRUS FRUIT OR MELONS
+09,coffee_tea_spices_herbs,Coffee Tea Spices & Herbs,"COFFEE, TEA, MATÉ AND SPICES"
+10,cereals_grains_oilseeds,Cereals Grains & Oilseeds,CEREALS
+11,cereals_grains_oilseeds,Cereals Grains & Oilseeds,PRODUCTS OF THE MILLING INDUSTRY; MALT; STARCHES; INULIN; WHEAT GLUTEN
+12,cereals_grains_oilseeds,Cereals Grains & Oilseeds,OIL SEEDS AND OLEAGINOUS FRUITS; MISCELLANEOUS GRAINS, SEEDS AND FRUIT
+13,cereals_grains_oilseeds,Cereals Grains & Oilseeds,LAC; GUMS, RESINS AND OTHER VEGETABLE SAPS AND EXTRACTS
+14,cereals_grains_oilseeds,Cereals Grains & Oilseeds,VEGETABLE PLAITING MATERIALS; VEGETABLE PRODUCTS NOT ELSEWHERE SPECIFIED
+15,fats_and_oils,Animal & Vegetable Fats & Oils,"ANIMAL, VEGETABLE OR MICROBIAL FATS AND OILS AND THEIR CLEAVAGE PRODUCTS"
+16,prepared_foods_confectionery,Prepared Foods & Confectionery,"PREPARATIONS OF MEAT, OF FISH, OF CRUSTACEANS, MOLLUSCS OR OTHER AQUATIC INVERTEBRATES"
+17,prepared_foods_confectionery,Prepared Foods & Confectionery,SUGARS AND SUGAR CONFECTIONERY
+18,prepared_foods_confectionery,Prepared Foods & Confectionery,COCOA AND COCOA PREPARATIONS
+19,prepared_foods_confectionery,Prepared Foods & Confectionery,"PREPARATIONS OF CEREALS, FLOUR, STARCH OR MILK; PASTRYCOOKS' PRODUCTS"
+20,prepared_foods_confectionery,Prepared Foods & Confectionery,"PREPARATIONS OF VEGETABLES, FRUIT, NUTS OR OTHER PARTS OF PLANTS"
+21,prepared_foods_confectionery,Prepared Foods & Confectionery,MISCELLANEOUS EDIBLE PREPARATIONS
+22,beverages_spirits_tobacco,Beverages Spirits & Tobacco,"BEVERAGES, SPIRITS AND VINEGAR"
+23,animal_feed_food_residues,Animal Feed & Food Industry Residues,RESIDUES AND WASTE FROM THE FOOD INDUSTRIES; PREPARED ANIMAL FODDER
+24,beverages_spirits_tobacco,Beverages Spirits & Tobacco,TOBACCO AND MANUFACTURED TOBACCO SUBSTITUTES; PRODUCTS WITH NICOTINE
+25,mining_minerals_fuels,Mining Minerals & Mineral Fuels,"SALT; SULPHUR; EARTHS AND STONE; PLASTERING MATERIALS, LIME AND CEMENT"
+26,mining_minerals_fuels,Mining Minerals & Mineral Fuels,"ORES, SLAG AND ASH"
+27,mining_minerals_fuels,Mining Minerals & Mineral Fuels,"MINERAL FUELS, MINERAL OILS AND PRODUCTS OF THEIR DISTILLATION; BITUMINOUS SUBSTANCES; MINERAL WAXES"
+28,industrial_chemicals,Industrial Chemicals,INORGANIC CHEMICALS; ORGANIC OR INORGANIC COMPOUNDS OF PRECIOUS METALS
+29,industrial_chemicals,Industrial Chemicals,ORGANIC CHEMICALS
+30,pharmaceuticals,Pharmaceuticals,PHARMACEUTICAL PRODUCTS
+31,fertilisers,Fertilisers,FERTILISERS
+32,paints_dyes_pigments,Paints Dyes & Pigments,"TANNING OR DYEING EXTRACTS; TANNINS AND THEIR DERIVATIVES; DYES, PIGMENTS AND OTHER COLOURING MATTER; PAINTS AND VARNISHES"
+33,cosmetics_personal_care,Cosmetics & Personal Care,"ESSENTIAL OILS AND RESINOIDS; PERFUMERY, COSMETIC OR TOILET PREPARATIONS"
+34,cosmetics_personal_care,Cosmetics & Personal Care,"SOAP, ORGANIC SURFACE-ACTIVE AGENTS, WASHING PREPARATIONS, LUBRICATING PREPARATIONS, ARTIFICIAL WAXES, CANDLES"
+35,industrial_chemicals,Industrial Chemicals,ALBUMINOIDAL SUBSTANCES; MODIFIED STARCHES; GLUES; ENZYMES
+36,explosives_pyrotechnics,Explosives & Pyrotechnics,EXPLOSIVES; PYROTECHNIC PRODUCTS; MATCHES; PYROPHORIC ALLOYS; CERTAIN COMBUSTIBLE PREPARATIONS
+37,industrial_chemicals,Industrial Chemicals,PHOTOGRAPHIC OR CINEMATOGRAPHIC GOODS
+38,industrial_chemicals,Industrial Chemicals,MISCELLANEOUS CHEMICAL PRODUCTS
+39,plastics_rubber,Plastics & Rubber,PLASTICS AND ARTICLES THEREOF
+40,plastics_rubber,Plastics & Rubber,RUBBER AND ARTICLES THEREOF
+41,leather_hides_furs,Leather Hides & Furs,RAW HIDES AND SKINS (OTHER THAN FURSKINS) AND LEATHER
+42,leather_hides_furs,Leather Hides & Furs,"ARTICLES OF LEATHER; SADDLERY AND HARNESS; TRAVEL GOODS, HANDBAGS AND SIMILAR CONTAINERS"
+43,leather_hides_furs,Leather Hides & Furs,FURSKINS AND ARTIFICIAL FUR; MANUFACTURES THEREOF
+44,wood_cork_basketwork,Wood Cork & Basketwork,WOOD AND ARTICLES OF WOOD; WOOD CHARCOAL
+45,wood_cork_basketwork,Wood Cork & Basketwork,CORK AND ARTICLES OF CORK
+46,wood_cork_basketwork,Wood Cork & Basketwork,"MANUFACTURES OF STRAW, OF ESPARTO OR OF OTHER PLAITING MATERIALS; BASKETWARE AND WICKERWORK"
+47,paper_pulp_print,Paper Pulp & Printed Materials,PULP OF WOOD OR OF OTHER FIBROUS CELLULOSIC MATERIAL; RECOVERED (WASTE AND SCRAP) PAPER OR PAPERBOARD
+48,paper_pulp_print,Paper Pulp & Printed Materials,"PAPER AND PAPERBOARD; ARTICLES OF PAPER PULP, OF PAPER OR OF PAPERBOARD"
+49,paper_pulp_print,Paper Pulp & Printed Materials,"PRINTED BOOKS, NEWSPAPERS, PICTURES AND OTHER PRODUCTS OF THE PRINTING INDUSTRY"
+50,textile_materials_yarns,Textile Materials & Yarns,SILK
+51,textile_materials_yarns,Textile Materials & Yarns,"WOOL, FINE OR COARSE ANIMAL HAIR; HORSEHAIR YARN AND WOVEN FABRIC"
+52,textile_materials_yarns,Textile Materials & Yarns,COTTON
+53,textile_materials_yarns,Textile Materials & Yarns,OTHER VEGETABLE TEXTILE FIBRES; PAPER YARN AND WOVEN FABRICS OF PAPER YARN
+54,textile_materials_yarns,Textile Materials & Yarns,MAN-MADE FILAMENTS; STRIP AND THE LIKE OF MAN-MADE TEXTILE MATERIALS
+55,textile_materials_yarns,Textile Materials & Yarns,MAN-MADE STAPLE FIBRES
+56,textile_materials_yarns,Textile Materials & Yarns,"WADDING, FELT AND NONWOVENS; SPECIAL YARNS; TWINE, CORDAGE, ROPES AND CABLES"
+57,apparel_finished_textiles,Apparel & Finished Textiles,CARPETS AND OTHER TEXTILE FLOOR COVERINGS
+58,apparel_finished_textiles,Apparel & Finished Textiles,"SPECIAL WOVEN FABRICS; TUFTED TEXTILE FABRICS; LACE; TAPESTRIES; TRIMMINGS; EMBROIDERY"
+59,apparel_finished_textiles,Apparel & Finished Textiles,"IMPREGNATED, COATED, COVERED OR LAMINATED TEXTILE FABRICS"
+60,apparel_finished_textiles,Apparel & Finished Textiles,KNITTED OR CROCHETED FABRICS
+61,apparel_finished_textiles,Apparel & Finished Textiles,"ARTICLES OF APPAREL AND CLOTHING ACCESSORIES, KNITTED OR CROCHETED"
+62,apparel_finished_textiles,Apparel & Finished Textiles,"ARTICLES OF APPAREL AND CLOTHING ACCESSORIES, NOT KNITTED OR CROCHETED"
+63,apparel_finished_textiles,Apparel & Finished Textiles,"OTHER MADE-UP TEXTILE ARTICLES; SETS; WORN CLOTHING AND WORN TEXTILE ARTICLES; RAGS"
+64,footwear_headgear_accessories,Footwear Headgear & Wearable Accessories,"FOOTWEAR, GAITERS AND THE LIKE; PARTS OF SUCH ARTICLES"
+65,footwear_headgear_accessories,Footwear Headgear & Wearable Accessories,HEADGEAR AND PARTS THEREOF
+66,footwear_headgear_accessories,Footwear Headgear & Wearable Accessories,"UMBRELLAS, SUN UMBRELLAS, WALKING STICKS, SEAT-STICKS, WHIPS, RIDING-CROPS"
+67,footwear_headgear_accessories,Footwear Headgear & Wearable Accessories,"PREPARED FEATHERS AND DOWN AND ARTICLES MADE OF FEATHERS OR OF DOWN; ARTIFICIAL FLOWERS"
+68,stone_cement_glass_ceramics,Stone Cement Glass & Ceramics,"ARTICLES OF STONE, PLASTER, CEMENT, ASBESTOS, MICA OR SIMILAR MATERIALS"
+69,stone_cement_glass_ceramics,Stone Cement Glass & Ceramics,CERAMIC PRODUCTS
+70,stone_cement_glass_ceramics,Stone Cement Glass & Ceramics,GLASS AND GLASSWARE
+71,jewellery_precious_metals,Jewellery & Precious Metals,"NATURAL OR CULTURED PEARLS, PRECIOUS OR SEMI-PRECIOUS STONES, PRECIOUS METALS"
+72,iron_steel_metal_articles,Iron Steel & Metal Articles,IRON AND STEEL
+73,iron_steel_metal_articles,Iron Steel & Metal Articles,ARTICLES OF IRON OR STEEL
+74,non_ferrous_metals,Non-Ferrous Metals,COPPER AND ARTICLES THEREOF
+75,non_ferrous_metals,Non-Ferrous Metals,NICKEL AND ARTICLES THEREOF
+76,non_ferrous_metals,Non-Ferrous Metals,ALUMINIUM AND ARTICLES THEREOF
+78,non_ferrous_metals,Non-Ferrous Metals,LEAD AND ARTICLES THEREOF
+79,non_ferrous_metals,Non-Ferrous Metals,ZINC AND ARTICLES THEREOF
+80,non_ferrous_metals,Non-Ferrous Metals,TIN AND ARTICLES THEREOF
+81,non_ferrous_metals,Non-Ferrous Metals,OTHER BASE METALS; CERMETS; ARTICLES THEREOF
+82,iron_steel_metal_articles,Iron Steel & Metal Articles,"TOOLS, IMPLEMENTS, CUTLERY, SPOONS AND FORKS, OF BASE METAL"
+83,iron_steel_metal_articles,Iron Steel & Metal Articles,MISCELLANEOUS ARTICLES OF BASE METAL
+84,industrial_machinery,Industrial Machinery,"NUCLEAR REACTORS, BOILERS, MACHINERY AND MECHANICAL APPLIANCES"
+85,electronics_electrical,Electronics & Electrical Equipment,"ELECTRICAL MACHINERY AND EQUIPMENT; SOUND RECORDERS AND REPRODUCERS, TELEVISION IMAGE AND SOUND RECORDERS"
+86,vehicles_aircraft_marine,Vehicles Aircraft & Marine Vessels,RAILWAY OR TRAMWAY LOCOMOTIVES; ROLLING STOCK AND PARTS THEREOF
+87,vehicles_aircraft_marine,Vehicles Aircraft & Marine Vessels,VEHICLES OTHER THAN RAILWAY OR TRAMWAY ROLLING STOCK
+88,vehicles_aircraft_marine,Vehicles Aircraft & Marine Vessels,"AIRCRAFT, SPACECRAFT, AND PARTS THEREOF"
+89,vehicles_aircraft_marine,Vehicles Aircraft & Marine Vessels,"SHIPS, BOATS AND FLOATING STRUCTURES"
+90,optical_medical_precision,Optical Medical & Precision Instruments,"OPTICAL, PHOTOGRAPHIC, CINEMATOGRAPHIC, MEASURING, CHECKING, PRECISION, MEDICAL OR SURGICAL INSTRUMENTS"
+91,clocks_watches_musical,Clocks Watches & Musical Instruments,CLOCKS AND WATCHES AND PARTS THEREOF
+92,clocks_watches_musical,Clocks Watches & Musical Instruments,MUSICAL INSTRUMENTS; PARTS AND ACCESSORIES OF SUCH ARTICLES
+93,arms_ammunition,Arms & Ammunition,ARMS AND AMMUNITION; PARTS AND ACCESSORIES THEREOF
+94,furniture_lighting,Furniture & Lighting,"FURNITURE; BEDDING, MATTRESSES, MATTRESS SUPPORTS, CUSHIONS; LUMINAIRES AND LIGHTING FITTINGS"
+95,toys_games_sports,Toys Games & Sports Equipment,"TOYS, GAMES AND SPORTS REQUISITES; PARTS AND ACCESSORIES THEREOF"
+96,misc_manufactured,Miscellaneous Manufactured Articles,MISCELLANEOUS MANUFACTURED ARTICLES
+97,art_antiques_collectibles,Art Antiques & Collectibles,"WORKS OF ART, COLLECTORS' PIECES AND ANTIQUES"
